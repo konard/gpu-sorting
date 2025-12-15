@@ -212,7 +212,6 @@ mod metal_impl {
 
             // Threadgroup memory sizes
             let histogram_tg_mem = (RADIX_SIZE * mem::size_of::<u32>()) as u64;
-            let scatter_tg_mem = (RADIX_SIZE * mem::size_of::<u32>()) as u64;
 
             // Determine actual threadgroup size to use
             let tg_size = THREADGROUP_SIZE.min(self.max_threadgroup_size);
@@ -328,7 +327,6 @@ mod metal_impl {
                     encoder.set_buffer(3, Some(&array_size_buffer), 0);
                     encoder.set_buffer(4, Some(&shift_buffer), 0);
                     encoder.set_threadgroup_memory_length(0, histogram_tg_mem);
-                    encoder.set_threadgroup_memory_length(1, scatter_tg_mem);
 
                     let grid_size = MTLSize::new((num_threadgroups * tg_size) as u64, 1, 1);
                     let threadgroup_size = MTLSize::new(tg_size as u64, 1, 1);

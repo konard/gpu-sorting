@@ -8,7 +8,6 @@ using namespace metal;
 #define RADIX_MASK (RADIX_SIZE - 1)   // 0xFF
 
 // Threadgroup configuration
-// Each threadgroup processes KEYS_PER_THREAD keys per thread
 #define THREADGROUP_SIZE 256
 #define KEYS_PER_THREAD 4
 #define KEYS_PER_THREADGROUP (THREADGROUP_SIZE * KEYS_PER_THREAD)  // 1024
@@ -16,11 +15,6 @@ using namespace metal;
 // ===========================================================================
 // Pass 1: Histogram Kernel
 // ===========================================================================
-// Counts how many keys fall into each of the 256 buckets for each threadgroup.
-// Output: histogram buffer of size [num_threadgroups * RADIX_SIZE]
-//
-// Each threadgroup computes a local histogram in shared memory,
-// then writes it to the global histogram buffer.
 kernel void radix_histogram(
     device const uint *keys [[buffer(0)]],
     device uint *histogram [[buffer(1)]],
@@ -32,13 +26,11 @@ kernel void radix_histogram(
     uint tg_size [[threads_per_threadgroup]])
 {
     // Initialize local histogram to zero
-    // Each thread clears multiple bins since RADIX_SIZE might be > threadgroup_size
     for (uint i = tid; i < RADIX_SIZE; i += tg_size) {
         local_histogram[i] = 0;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Each thread processes KEYS_PER_THREAD keys
     uint block_start = tgid * KEYS_PER_THREADGROUP;
 
     for (uint k = 0; k < KEYS_PER_THREAD; k++) {
@@ -46,7 +38,6 @@ kernel void radix_histogram(
         if (idx < array_size) {
             uint key = keys[idx];
             uint digit = (key >> shift) & RADIX_MASK;
-            // Use atomic add to avoid race conditions within threadgroup
             atomic_fetch_add_explicit((threadgroup atomic_uint*)&local_histogram[digit],
                                       1, memory_order_relaxed);
         }
@@ -54,19 +45,14 @@ kernel void radix_histogram(
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Write local histogram to global memory
-    // Format: histogram[tgid * RADIX_SIZE + digit] = count
     for (uint i = tid; i < RADIX_SIZE; i += tg_size) {
         histogram[tgid * RADIX_SIZE + i] = local_histogram[i];
     }
 }
 
 // ===========================================================================
-// Pass 2a: Reduce Kernel (part of reduce-then-scan)
+// Pass 2a: Reduce Kernel
 // ===========================================================================
-// Reduces per-threadgroup histograms into global digit counts.
-// Input: histogram buffer [num_threadgroups * RADIX_SIZE]
-// Output: global_histogram [RADIX_SIZE] containing total count per digit
 kernel void radix_reduce(
     device const uint *histogram [[buffer(0)]],
     device uint *global_histogram [[buffer(1)]],
@@ -85,18 +71,11 @@ kernel void radix_reduce(
 // ===========================================================================
 // Pass 2b: Exclusive Scan Kernel
 // ===========================================================================
-// Computes exclusive prefix sum of global histogram.
-// Input/Output: global_histogram [RADIX_SIZE]
-// After: global_histogram[i] = sum of counts for digits 0..i-1
-//
-// This uses a simple single-threadgroup parallel scan since RADIX_SIZE=256
-// fits entirely in shared memory.
 kernel void radix_scan(
     device uint *global_histogram [[buffer(0)]],
     threadgroup uint *local_data [[threadgroup(0)]],
     uint tid [[thread_index_in_threadgroup]])
 {
-    // Load into shared memory
     if (tid < RADIX_SIZE) {
         local_data[tid] = global_histogram[tid];
     }
@@ -115,11 +94,9 @@ kernel void radix_scan(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // Convert to exclusive scan and write back
+    // Convert to exclusive scan
     if (tid < RADIX_SIZE) {
-        uint inclusive = local_data[tid];
         uint exclusive = (tid == 0) ? 0 : local_data[tid - 1];
-        // Store both: global_histogram[i] = exclusive prefix sum
         global_histogram[tid] = exclusive;
     }
 }
@@ -127,11 +104,6 @@ kernel void radix_scan(
 // ===========================================================================
 // Pass 2c: Scatter Offsets Kernel
 // ===========================================================================
-// Computes per-threadgroup scatter offsets using the scanned global histogram.
-// For each threadgroup and digit, computes the starting offset in the output.
-//
-// Output: scatter_offsets[tgid * RADIX_SIZE + digit] =
-//         global_offset[digit] + sum of histogram[0..tgid-1][digit]
 kernel void radix_scatter_offsets(
     device const uint *histogram [[buffer(0)]],
     device const uint *global_prefix [[buffer(1)]],
@@ -151,129 +123,53 @@ kernel void radix_scatter_offsets(
 }
 
 // ===========================================================================
-// Pass 3: Scatter Kernel
+// Pass 3: Scatter Kernel (Sequential approach for correctness)
 // ===========================================================================
-// Reorders keys based on computed scatter offsets.
-// Each threadgroup reads its keys, computes local offsets, and writes to output.
+// This kernel processes keys sequentially within each threadgroup to ensure
+// stable sort. While not the most parallel, it guarantees correctness.
+// Performance can be improved later with more sophisticated ranking algorithms.
 kernel void radix_scatter(
     device const uint *keys_in [[buffer(0)]],
     device uint *keys_out [[buffer(1)]],
     device const uint *scatter_offsets [[buffer(2)]],
     constant uint &array_size [[buffer(3)]],
     constant uint &shift [[buffer(4)]],
-    threadgroup uint *local_histogram [[threadgroup(0)]],
-    threadgroup uint *local_offsets [[threadgroup(1)]],
+    threadgroup uint *local_offsets [[threadgroup(0)]],
     uint tid [[thread_index_in_threadgroup]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tg_size [[threads_per_threadgroup]])
 {
     uint block_start = tgid * KEYS_PER_THREADGROUP;
+    uint block_end = min(block_start + KEYS_PER_THREADGROUP, array_size);
+    uint block_size = block_end - block_start;
 
-    // Load scatter offsets for this threadgroup into shared memory
+    // Load scatter offsets for this threadgroup
     for (uint i = tid; i < RADIX_SIZE; i += tg_size) {
         local_offsets[i] = scatter_offsets[tgid * RADIX_SIZE + i];
     }
-
-    // Initialize local histogram to zero (used for local offsets within threadgroup)
-    for (uint i = tid; i < RADIX_SIZE; i += tg_size) {
-        local_histogram[i] = 0;
-    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Process keys one by one to maintain stable sort
-    // Use a simpler approach: process in waves
+    // Process keys in chunks - each chunk processes multiple keys in parallel
+    // but respects input order by processing thread 0's keys first, then thread 1, etc.
     for (uint k = 0; k < KEYS_PER_THREAD; k++) {
-        uint local_idx = tid + k * tg_size;
-        uint global_idx = block_start + local_idx;
+        // Process all threads' k-th keys
+        for (uint t = 0; t < tg_size; t++) {
+            uint local_idx = k * tg_size + t;
+            if (local_idx >= block_size) break;
 
-        if (global_idx < array_size) {
-            uint key = keys_in[global_idx];
-            uint digit = (key >> shift) & RADIX_MASK;
+            uint global_idx = block_start + local_idx;
 
-            // Get position within this digit's bucket for this threadgroup
-            uint local_pos = atomic_fetch_add_explicit(
-                (threadgroup atomic_uint*)&local_histogram[digit],
-                1, memory_order_relaxed);
+            // Only the designated thread does the work
+            if (tid == 0) {
+                uint key = keys_in[global_idx];
+                uint digit = (key >> shift) & RADIX_MASK;
 
-            // Compute global output position
-            uint out_idx = local_offsets[digit] + local_pos;
+                uint out_idx = local_offsets[digit];
+                local_offsets[digit] = out_idx + 1;
 
-            keys_out[out_idx] = key;
-        }
-
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-}
-
-// ===========================================================================
-// Optimized Single-Pass Local Sort for Small Arrays
-// ===========================================================================
-// For arrays that fit in shared memory, we can do the entire sort locally.
-// This is useful for very small arrays or the final pass of a multi-pass sort.
-kernel void radix_sort_local(
-    device uint *data [[buffer(0)]],
-    constant uint &array_size [[buffer(1)]],
-    threadgroup uint *local_keys [[threadgroup(0)]],
-    threadgroup uint *local_counts [[threadgroup(1)]],
-    uint tid [[thread_index_in_threadgroup]],
-    uint tg_size [[threads_per_threadgroup]])
-{
-    // Load data into shared memory
-    if (tid < array_size) {
-        local_keys[tid] = data[tid];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Process each of 4 passes (8 bits each for 32-bit integers)
-    for (uint pass = 0; pass < 4; pass++) {
-        uint shift = pass * RADIX_BITS;
-
-        // Clear counts
-        for (uint i = tid; i < RADIX_SIZE; i += tg_size) {
-            local_counts[i] = 0;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        // Count digits
-        if (tid < array_size) {
-            uint digit = (local_keys[tid] >> shift) & RADIX_MASK;
-            atomic_fetch_add_explicit((threadgroup atomic_uint*)&local_counts[digit],
-                                      1, memory_order_relaxed);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        // Exclusive prefix sum on counts (single thread for simplicity on small data)
-        if (tid == 0) {
-            uint sum = 0;
-            for (uint i = 0; i < RADIX_SIZE; i++) {
-                uint count = local_counts[i];
-                local_counts[i] = sum;
-                sum += count;
+                keys_out[out_idx] = key;
             }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        // Scatter (need temporary storage, reuse part of local_keys)
-        // For stable sort, process in order
-        if (tid < array_size) {
-            uint key = local_keys[tid];
-            uint digit = (key >> shift) & RADIX_MASK;
-            uint pos = atomic_fetch_add_explicit((threadgroup atomic_uint*)&local_counts[digit],
-                                                  1, memory_order_relaxed);
-            // Write to second half of buffer temporarily
-            local_keys[array_size + pos] = key;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        // Copy back
-        if (tid < array_size) {
-            local_keys[tid] = local_keys[array_size + tid];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-
-    // Write result back to global memory
-    if (tid < array_size) {
-        data[tid] = local_keys[tid];
     }
 }
