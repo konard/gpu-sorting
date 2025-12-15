@@ -3,6 +3,13 @@
 //! This module implements bitonic sort on the GPU using Apple's Metal framework.
 //! Bitonic sort is well-suited for GPU parallelization due to its regular structure.
 //!
+//! ## Optimizations Implemented
+//!
+//! 1. **Threadgroup Memory**: Uses fast on-chip shared memory for local sorting steps
+//! 2. **Batched Dispatches**: Multiple sorting steps are combined into single kernel invocations
+//! 3. **Command Buffer Batching**: Multiple dispatches are encoded into single command buffers
+//! 4. **Pre-allocated Parameter Buffers**: Reusable buffers for kernel parameters
+//!
 //! This module only compiles on macOS. On other platforms, a stub implementation
 //! is provided that returns an error.
 
@@ -12,17 +19,109 @@ mod metal_impl {
     use std::mem;
     use std::path::PathBuf;
 
-    /// Shader source code for bitonic sort
+    /// Optimized shader source code for bitonic sort.
+    ///
+    /// This shader includes two kernels:
+    /// 1. `bitonic_sort_local` - Sorts within threadgroup using fast shared memory
+    /// 2. `bitonic_sort_global` - Performs cross-threadgroup comparisons via global memory
     const SHADER_SOURCE: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-/// Bitonic sort step kernel.
+// Maximum elements that can be sorted locally (must match THREADGROUP_SIZE * 2)
+#define LOCAL_SIZE 2048
+
+/// Perform a compare-and-swap operation for bitonic sort
+inline void compare_and_swap(
+    thread uint &a,
+    thread uint &b,
+    bool ascending)
+{
+    if ((a > b) == ascending) {
+        uint temp = a;
+        a = b;
+        b = temp;
+    }
+}
+
+/// Local bitonic sort kernel - sorts blocks that fit in threadgroup memory.
+/// Each threadgroup sorts LOCAL_SIZE elements entirely in shared memory,
+/// dramatically reducing global memory bandwidth.
 ///
-/// This kernel performs one step of bitonic sort. The algorithm works by:
-/// 1. Comparing pairs of elements at specific distances
-/// 2. Swapping elements based on the current sorting direction
-kernel void bitonic_sort_step(
+/// This kernel performs the ENTIRE bitonic sort sequence for its local block,
+/// executing all log2(LOCAL_SIZE) stages within a single dispatch.
+kernel void bitonic_sort_local(
+    device uint *data [[buffer(0)]],
+    constant uint &array_size [[buffer(1)]],
+    threadgroup uint *local_data [[threadgroup(0)]],
+    uint gid [[thread_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tg_size [[threads_per_threadgroup]])
+{
+    // Each thread handles 2 elements
+    uint local_size = tg_size * 2;
+    uint block_start = tgid * local_size;
+
+    // Load two elements per thread into shared memory
+    uint idx1 = tid * 2;
+    uint idx2 = tid * 2 + 1;
+    uint global_idx1 = block_start + idx1;
+    uint global_idx2 = block_start + idx2;
+
+    // Bounds checking for partial blocks
+    local_data[idx1] = (global_idx1 < array_size) ? data[global_idx1] : 0xFFFFFFFF;
+    local_data[idx2] = (global_idx2 < array_size) ? data[global_idx2] : 0xFFFFFFFF;
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Perform complete bitonic sort in shared memory
+    // This executes ALL stages and substages for this local block
+    for (uint stage = 0; (1u << stage) < local_size; stage++) {
+        uint block_size = 2u << stage;
+
+        for (uint substage = 0; substage <= stage; substage++) {
+            uint sub_block_size = block_size >> substage;
+            uint half_sub = sub_block_size / 2;
+
+            // Each thread processes one comparison
+            uint pair_idx = tid;
+            uint sub_block_idx = pair_idx / half_sub;
+            uint idx_in_sub = pair_idx % half_sub;
+
+            uint left_idx = sub_block_idx * sub_block_size + idx_in_sub;
+            uint right_idx = left_idx + half_sub;
+
+            if (right_idx < local_size) {
+                uint block_idx = left_idx / block_size;
+                bool ascending = (block_idx % 2) == 0;
+
+                uint left_val = local_data[left_idx];
+                uint right_val = local_data[right_idx];
+
+                if ((left_val > right_val) == ascending) {
+                    local_data[left_idx] = right_val;
+                    local_data[right_idx] = left_val;
+                }
+            }
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    // Write sorted data back to global memory
+    if (global_idx1 < array_size) data[global_idx1] = local_data[idx1];
+    if (global_idx2 < array_size) data[global_idx2] = local_data[idx2];
+}
+
+/// Global bitonic sort step kernel - for cross-threadgroup operations.
+/// Used when the comparison distance exceeds threadgroup memory capacity.
+///
+/// Parameters:
+/// - data: The array being sorted
+/// - block_size: Current bitonic block size (determines sort direction)
+/// - sub_block_size: Current comparison distance
+kernel void bitonic_sort_global(
     device uint *data [[buffer(0)]],
     constant uint &block_size [[buffer(1)]],
     constant uint &sub_block_size [[buffer(2)]],
@@ -41,20 +140,129 @@ kernel void bitonic_sort_step(
     uint left_val = data[left_index];
     uint right_val = data[right_index];
 
-    bool should_swap = ascending ? (left_val > right_val) : (left_val < right_val);
-
-    if (should_swap) {
+    if ((left_val > right_val) == ascending) {
         data[left_index] = right_val;
         data[right_index] = left_val;
     }
 }
+
+/// Merge step kernel - performs a single substage of bitonic merge.
+/// After local sorting, this kernel handles the remaining global merge stages.
+/// Uses the same algorithm as bitonic_sort_global but with proper block alignment.
+kernel void bitonic_merge_global(
+    device uint *data [[buffer(0)]],
+    constant uint &total_block_size [[buffer(1)]],
+    constant uint &comparison_distance [[buffer(2)]],
+    constant uint &array_size [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint half_dist = comparison_distance / 2;
+    uint pair_idx = gid;
+    uint sub_block_idx = pair_idx / half_dist;
+    uint idx_in_sub = pair_idx % half_dist;
+
+    uint left_idx = sub_block_idx * comparison_distance + idx_in_sub;
+    uint right_idx = left_idx + half_dist;
+
+    if (right_idx >= array_size) return;
+
+    uint block_idx = left_idx / total_block_size;
+    bool ascending = (block_idx % 2) == 0;
+
+    uint left_val = data[left_idx];
+    uint right_val = data[right_idx];
+
+    if ((left_val > right_val) == ascending) {
+        data[left_idx] = right_val;
+        data[right_idx] = left_val;
+    }
+}
+
+/// Final merge kernel using threadgroup memory for the local portion.
+/// After a global comparison step, this performs remaining local comparisons
+/// efficiently using shared memory.
+kernel void bitonic_merge_local(
+    device uint *data [[buffer(0)]],
+    constant uint &total_block_size [[buffer(1)]],
+    constant uint &max_local_dist [[buffer(2)]],
+    constant uint &array_size [[buffer(3)]],
+    threadgroup uint *local_data [[threadgroup(0)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tg_size [[threads_per_threadgroup]])
+{
+    uint local_size = tg_size * 2;
+    uint block_start = tgid * local_size;
+
+    // Load data into shared memory
+    uint idx1 = tid * 2;
+    uint idx2 = tid * 2 + 1;
+    uint global_idx1 = block_start + idx1;
+    uint global_idx2 = block_start + idx2;
+
+    local_data[idx1] = (global_idx1 < array_size) ? data[global_idx1] : 0xFFFFFFFF;
+    local_data[idx2] = (global_idx2 < array_size) ? data[global_idx2] : 0xFFFFFFFF;
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Perform local merge steps (comparison distances that fit in shared memory)
+    for (uint comp_dist = max_local_dist; comp_dist >= 2; comp_dist /= 2) {
+        uint half_dist = comp_dist / 2;
+        uint pair_idx = tid;
+        uint sub_block_idx = pair_idx / half_dist;
+        uint idx_in_sub = pair_idx % half_dist;
+
+        uint left_idx = sub_block_idx * comp_dist + idx_in_sub;
+        uint right_idx = left_idx + half_dist;
+
+        if (right_idx < local_size) {
+            // Calculate block index relative to total_block_size for direction
+            uint global_left = block_start + left_idx;
+            uint block_idx = global_left / total_block_size;
+            bool ascending = (block_idx % 2) == 0;
+
+            uint left_val = local_data[left_idx];
+            uint right_val = local_data[right_idx];
+
+            if ((left_val > right_val) == ascending) {
+                local_data[left_idx] = right_val;
+                local_data[right_idx] = left_val;
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Write back to global memory
+    if (global_idx1 < array_size) data[global_idx1] = local_data[idx1];
+    if (global_idx2 < array_size) data[global_idx2] = local_data[idx2];
+}
 "#;
 
+    /// Size of threadgroup for local sorting (1024 threads handle 2048 elements)
+    const THREADGROUP_SIZE: usize = 1024;
+    /// Number of elements sorted per threadgroup using shared memory
+    const LOCAL_SORT_SIZE: usize = THREADGROUP_SIZE * 2;
+
     /// GPU Sorter using Metal for Apple Silicon
+    ///
+    /// This implementation uses an optimized hybrid approach:
+    /// 1. First, sorts blocks of LOCAL_SORT_SIZE elements entirely in threadgroup memory
+    /// 2. Then, performs global merge passes for larger blocks
+    /// 3. Uses batched command encoding to minimize CPU-GPU synchronization
     pub struct GpuSorter {
         device: Device,
         command_queue: CommandQueue,
-        pipeline_state: ComputePipelineState,
+        /// Pipeline for local sorting in threadgroup memory
+        local_sort_pipeline: ComputePipelineState,
+        /// Pipeline for global comparison steps
+        global_sort_pipeline: ComputePipelineState,
+        /// Pipeline for global merge steps
+        global_merge_pipeline: ComputePipelineState,
+        /// Pipeline for local merge after global step
+        local_merge_pipeline: ComputePipelineState,
+        /// Maximum threads per threadgroup supported by the device
+        max_threadgroup_size: usize,
     }
 
     impl GpuSorter {
@@ -78,20 +286,51 @@ kernel void bitonic_sort_step(
                 .new_library_with_source(SHADER_SOURCE, &options)
                 .map_err(|e| format!("Failed to compile shader: {}", e))?;
 
-            // Get the kernel function
-            let kernel_function = library
-                .get_function("bitonic_sort_step", None)
-                .map_err(|e| format!("Failed to get kernel function: {}", e))?;
+            // Get kernel functions
+            let local_sort_fn = library
+                .get_function("bitonic_sort_local", None)
+                .map_err(|e| format!("Failed to get bitonic_sort_local: {}", e))?;
 
-            // Create compute pipeline state
-            let pipeline_state = device
-                .new_compute_pipeline_state_with_function(&kernel_function)
-                .map_err(|e| format!("Failed to create pipeline state: {}", e))?;
+            let global_sort_fn = library
+                .get_function("bitonic_sort_global", None)
+                .map_err(|e| format!("Failed to get bitonic_sort_global: {}", e))?;
+
+            let global_merge_fn = library
+                .get_function("bitonic_merge_global", None)
+                .map_err(|e| format!("Failed to get bitonic_merge_global: {}", e))?;
+
+            let local_merge_fn = library
+                .get_function("bitonic_merge_local", None)
+                .map_err(|e| format!("Failed to get bitonic_merge_local: {}", e))?;
+
+            // Create compute pipeline states
+            let local_sort_pipeline = device
+                .new_compute_pipeline_state_with_function(&local_sort_fn)
+                .map_err(|e| format!("Failed to create local_sort pipeline: {}", e))?;
+
+            let global_sort_pipeline = device
+                .new_compute_pipeline_state_with_function(&global_sort_fn)
+                .map_err(|e| format!("Failed to create global_sort pipeline: {}", e))?;
+
+            let global_merge_pipeline = device
+                .new_compute_pipeline_state_with_function(&global_merge_fn)
+                .map_err(|e| format!("Failed to create global_merge pipeline: {}", e))?;
+
+            let local_merge_pipeline = device
+                .new_compute_pipeline_state_with_function(&local_merge_fn)
+                .map_err(|e| format!("Failed to create local_merge pipeline: {}", e))?;
+
+            let max_threadgroup_size =
+                local_sort_pipeline.max_total_threads_per_threadgroup() as usize;
 
             Ok(Self {
                 device,
                 command_queue,
-                pipeline_state,
+                local_sort_pipeline,
+                global_sort_pipeline,
+                global_merge_pipeline,
+                local_merge_pipeline,
+                max_threadgroup_size,
             })
         }
 
@@ -106,32 +345,73 @@ kernel void bitonic_sort_step(
                 .new_library_with_file(path)
                 .map_err(|e| format!("Failed to load metallib: {}", e))?;
 
-            let kernel_function = library
-                .get_function("bitonic_sort_step", None)
-                .map_err(|e| format!("Failed to get kernel function: {}", e))?;
+            let local_sort_fn = library
+                .get_function("bitonic_sort_local", None)
+                .map_err(|e| format!("Failed to get bitonic_sort_local: {}", e))?;
 
-            let pipeline_state = device
-                .new_compute_pipeline_state_with_function(&kernel_function)
-                .map_err(|e| format!("Failed to create pipeline state: {}", e))?;
+            let global_sort_fn = library
+                .get_function("bitonic_sort_global", None)
+                .map_err(|e| format!("Failed to get bitonic_sort_global: {}", e))?;
+
+            let global_merge_fn = library
+                .get_function("bitonic_merge_global", None)
+                .map_err(|e| format!("Failed to get bitonic_merge_global: {}", e))?;
+
+            let local_merge_fn = library
+                .get_function("bitonic_merge_local", None)
+                .map_err(|e| format!("Failed to get bitonic_merge_local: {}", e))?;
+
+            let local_sort_pipeline = device
+                .new_compute_pipeline_state_with_function(&local_sort_fn)
+                .map_err(|e| format!("Failed to create pipeline: {}", e))?;
+
+            let global_sort_pipeline = device
+                .new_compute_pipeline_state_with_function(&global_sort_fn)
+                .map_err(|e| format!("Failed to create pipeline: {}", e))?;
+
+            let global_merge_pipeline = device
+                .new_compute_pipeline_state_with_function(&global_merge_fn)
+                .map_err(|e| format!("Failed to create pipeline: {}", e))?;
+
+            let local_merge_pipeline = device
+                .new_compute_pipeline_state_with_function(&local_merge_fn)
+                .map_err(|e| format!("Failed to create pipeline: {}", e))?;
+
+            let max_threadgroup_size =
+                local_sort_pipeline.max_total_threads_per_threadgroup() as usize;
 
             Ok(Self {
                 device,
                 command_queue,
-                pipeline_state,
+                local_sort_pipeline,
+                global_sort_pipeline,
+                global_merge_pipeline,
+                local_merge_pipeline,
+                max_threadgroup_size,
             })
         }
 
         /// Sort the given data in-place using GPU bitonic sort.
         ///
         /// The input size must be a power of 2 for bitonic sort to work correctly.
+        ///
+        /// ## Algorithm
+        ///
+        /// This implementation uses an optimized two-phase approach:
+        ///
+        /// **Phase 1: Local Sort**
+        /// - Divides the array into blocks of LOCAL_SORT_SIZE elements
+        /// - Each block is sorted entirely in threadgroup memory with a single dispatch
+        /// - This eliminates ~log2(LOCAL_SORT_SIZE) separate dispatches per block
+        ///
+        /// **Phase 2: Global Merge**
+        /// - For block sizes larger than LOCAL_SORT_SIZE, performs global merge passes
+        /// - Uses a hybrid approach: global dispatches for large distances, local for small
+        /// - Commands are batched into single command buffers to reduce synchronization
         pub fn sort(&self, data: &mut [u32]) -> Result<(), String> {
             let n = data.len();
 
-            if n == 0 {
-                return Ok(());
-            }
-
-            if n == 1 {
+            if n == 0 || n == 1 {
                 return Ok(());
             }
 
@@ -151,54 +431,147 @@ kernel void bitonic_sort_step(
                 MTLResourceOptions::StorageModeShared,
             );
 
-            // Bitonic sort requires log2(n) stages
-            // Each stage k has k substages
-            let num_stages = (n as f64).log2() as u32;
+            // Determine threadgroup size (limited by device and our constant)
+            let tg_size = THREADGROUP_SIZE.min(self.max_threadgroup_size);
+            let local_sort_size = tg_size * 2;
 
-            for stage in 0..num_stages {
-                let block_size = 2u32 << stage; // 2, 4, 8, 16, ...
+            // Create reusable parameter buffer for array size
+            let n_u32 = n as u32;
+            let array_size_buffer = self.device.new_buffer_with_data(
+                &n_u32 as *const u32 as *const _,
+                mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            // Threadgroup memory size for local sorting
+            let threadgroup_mem_size = (local_sort_size * mem::size_of::<u32>()) as u64;
+
+            // ============================================
+            // Phase 1: Local Sort
+            // ============================================
+            // Sort each block of local_sort_size elements entirely in shared memory
+            {
+                let command_buffer = self.command_queue.new_command_buffer();
+                let encoder = command_buffer.new_compute_command_encoder();
+
+                encoder.set_compute_pipeline_state(&self.local_sort_pipeline);
+                encoder.set_buffer(0, Some(&buffer), 0);
+                encoder.set_buffer(1, Some(&array_size_buffer), 0);
+                encoder.set_threadgroup_memory_length(0, threadgroup_mem_size);
+
+                // Each threadgroup handles local_sort_size elements with tg_size threads
+                let num_threadgroups = (n + local_sort_size - 1) / local_sort_size;
+                let grid_size = MTLSize::new((num_threadgroups * tg_size) as u64, 1, 1);
+                let threadgroup_size = MTLSize::new(tg_size as u64, 1, 1);
+
+                encoder.dispatch_threads(grid_size, threadgroup_size);
+                encoder.end_encoding();
+
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
+            }
+
+            // If the array fits in a single local block, we're done
+            if n <= local_sort_size {
+                let result_ptr = buffer.contents() as *const u32;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(result_ptr, data.as_mut_ptr(), n);
+                }
+                return Ok(());
+            }
+
+            // ============================================
+            // Phase 2: Global Merge
+            // ============================================
+            // Now we have sorted blocks of local_sort_size. We need to merge them.
+            // For block sizes > local_sort_size, we need global memory operations.
+
+            let num_stages = (n as f64).log2() as u32;
+            let local_stages = (local_sort_size as f64).log2() as u32;
+
+            // Pre-allocate parameter buffers that we'll reuse
+            let mut param_buffer1 = self.device.new_buffer(
+                mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let mut param_buffer2 = self.device.new_buffer(
+                mem::size_of::<u32>() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            // Process stages where block_size > local_sort_size
+            for stage in local_stages..num_stages {
+                let block_size = 2u32 << stage;
+
+                // Create a command buffer for this stage (batching multiple substages)
+                let command_buffer = self.command_queue.new_command_buffer();
 
                 for substage in 0..=stage {
-                    let sub_block_size = block_size >> substage; // block_size, block_size/2, ...
+                    let comparison_distance = block_size >> substage;
 
-                    // Create parameter buffers
-                    let block_size_buffer = self.device.new_buffer_with_data(
-                        &block_size as *const u32 as *const _,
-                        mem::size_of::<u32>() as u64,
-                        MTLResourceOptions::StorageModeShared,
-                    );
+                    // If comparison distance fits in local memory, use local merge
+                    if comparison_distance as usize <= local_sort_size {
+                        // Use local merge kernel for all remaining substages of this stage
+                        let encoder = command_buffer.new_compute_command_encoder();
+                        encoder.set_compute_pipeline_state(&self.local_merge_pipeline);
 
-                    let sub_block_size_buffer = self.device.new_buffer_with_data(
-                        &sub_block_size as *const u32 as *const _,
-                        mem::size_of::<u32>() as u64,
-                        MTLResourceOptions::StorageModeShared,
-                    );
+                        // Update parameter buffers
+                        let block_size_ptr = param_buffer1.contents() as *mut u32;
+                        let max_local_dist_ptr = param_buffer2.contents() as *mut u32;
+                        unsafe {
+                            *block_size_ptr = block_size;
+                            *max_local_dist_ptr = comparison_distance;
+                        }
 
-                    // Create command buffer and encoder
-                    let command_buffer = self.command_queue.new_command_buffer();
-                    let encoder = command_buffer.new_compute_command_encoder();
+                        encoder.set_buffer(0, Some(&buffer), 0);
+                        encoder.set_buffer(1, Some(&param_buffer1), 0);
+                        encoder.set_buffer(2, Some(&param_buffer2), 0);
+                        encoder.set_buffer(3, Some(&array_size_buffer), 0);
+                        encoder.set_threadgroup_memory_length(0, threadgroup_mem_size);
 
-                    encoder.set_compute_pipeline_state(&self.pipeline_state);
-                    encoder.set_buffer(0, Some(&buffer), 0);
-                    encoder.set_buffer(1, Some(&block_size_buffer), 0);
-                    encoder.set_buffer(2, Some(&sub_block_size_buffer), 0);
+                        let num_threadgroups = (n + local_sort_size - 1) / local_sort_size;
+                        let grid_size = MTLSize::new((num_threadgroups * tg_size) as u64, 1, 1);
+                        let threadgroup_size = MTLSize::new(tg_size as u64, 1, 1);
 
-                    // Calculate thread count: we need n/2 comparisons
-                    let num_threads = n / 2;
-                    let thread_group_size = self
-                        .pipeline_state
-                        .max_total_threads_per_threadgroup()
-                        .min(num_threads as u64) as u64;
+                        encoder.dispatch_threads(grid_size, threadgroup_size);
+                        encoder.end_encoding();
 
-                    let grid_size = MTLSize::new(num_threads as u64, 1, 1);
-                    let threadgroup_size = MTLSize::new(thread_group_size, 1, 1);
+                        // Local merge handles all remaining substages, so break
+                        break;
+                    } else {
+                        // Use global merge kernel
+                        let encoder = command_buffer.new_compute_command_encoder();
+                        encoder.set_compute_pipeline_state(&self.global_merge_pipeline);
 
-                    encoder.dispatch_threads(grid_size, threadgroup_size);
-                    encoder.end_encoding();
+                        // Update parameter buffers
+                        let block_size_ptr = param_buffer1.contents() as *mut u32;
+                        let comp_dist_ptr = param_buffer2.contents() as *mut u32;
+                        unsafe {
+                            *block_size_ptr = block_size;
+                            *comp_dist_ptr = comparison_distance;
+                        }
 
-                    command_buffer.commit();
-                    command_buffer.wait_until_completed();
+                        encoder.set_buffer(0, Some(&buffer), 0);
+                        encoder.set_buffer(1, Some(&param_buffer1), 0);
+                        encoder.set_buffer(2, Some(&param_buffer2), 0);
+                        encoder.set_buffer(3, Some(&array_size_buffer), 0);
+
+                        let num_threads = n / 2;
+                        let thread_group_size = self
+                            .global_merge_pipeline
+                            .max_total_threads_per_threadgroup()
+                            .min(num_threads as u64);
+
+                        let grid_size = MTLSize::new(num_threads as u64, 1, 1);
+                        let threadgroup_size = MTLSize::new(thread_group_size, 1, 1);
+
+                        encoder.dispatch_threads(grid_size, threadgroup_size);
+                        encoder.end_encoding();
+                    }
                 }
+
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
             }
 
             // Copy result back to CPU
@@ -214,9 +587,10 @@ kernel void bitonic_sort_step(
         #[allow(dead_code)]
         pub fn device_info(&self) -> String {
             format!(
-                "Device: {}, Max threads per threadgroup: {}",
+                "Device: {}, Max threads per threadgroup: {}, Local sort size: {}",
                 self.device.name(),
-                self.pipeline_state.max_total_threads_per_threadgroup()
+                self.max_threadgroup_size,
+                self.max_threadgroup_size.min(THREADGROUP_SIZE) * 2
             )
         }
     }
@@ -336,5 +710,133 @@ mod tests {
 
         let mut data = vec![1, 2, 3]; // Not a power of 2
         assert!(sorter.sort(&mut data).is_err());
+    }
+
+    /// Test sorting that requires global merge phase (size > local_sort_size)
+    #[test]
+    fn test_gpu_sort_large_random() {
+        let sorter = match GpuSorter::new() {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Skipping GPU test: Metal not available");
+                return;
+            }
+        };
+
+        let mut rng = rand::thread_rng();
+        // 8192 elements = 4 * 2048, requires global merge
+        let size = 8192;
+        let mut data: Vec<u32> = (0..size).map(|_| rng.gen()).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+
+        sorter.sort(&mut data).unwrap();
+        assert!(is_sorted(&data));
+        assert_eq!(data, expected);
+    }
+
+    /// Test with 64K elements - multiple global merge stages
+    #[test]
+    fn test_gpu_sort_64k() {
+        let sorter = match GpuSorter::new() {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Skipping GPU test: Metal not available");
+                return;
+            }
+        };
+
+        let mut rng = rand::thread_rng();
+        let size = 65536; // 64K elements
+        let mut data: Vec<u32> = (0..size).map(|_| rng.gen()).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+
+        sorter.sort(&mut data).unwrap();
+        assert!(is_sorted(&data));
+        assert_eq!(data, expected);
+    }
+
+    /// Test edge case: exactly local_sort_size elements
+    #[test]
+    fn test_gpu_sort_exactly_local_size() {
+        let sorter = match GpuSorter::new() {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Skipping GPU test: Metal not available");
+                return;
+            }
+        };
+
+        let mut rng = rand::thread_rng();
+        let size = 2048; // Exactly local_sort_size
+        let mut data: Vec<u32> = (0..size).map(|_| rng.gen()).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+
+        sorter.sort(&mut data).unwrap();
+        assert!(is_sorted(&data));
+        assert_eq!(data, expected);
+    }
+
+    /// Test with already sorted data
+    #[test]
+    fn test_gpu_sort_already_sorted() {
+        let sorter = match GpuSorter::new() {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Skipping GPU test: Metal not available");
+                return;
+            }
+        };
+
+        let size = 4096;
+        let mut data: Vec<u32> = (0..size as u32).collect();
+        let expected = data.clone();
+
+        sorter.sort(&mut data).unwrap();
+        assert!(is_sorted(&data));
+        assert_eq!(data, expected);
+    }
+
+    /// Test with reverse sorted data
+    #[test]
+    fn test_gpu_sort_reverse_sorted() {
+        let sorter = match GpuSorter::new() {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Skipping GPU test: Metal not available");
+                return;
+            }
+        };
+
+        let size = 4096;
+        let mut data: Vec<u32> = (0..size as u32).rev().collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+
+        sorter.sort(&mut data).unwrap();
+        assert!(is_sorted(&data));
+        assert_eq!(data, expected);
+    }
+
+    /// Test with all same values
+    #[test]
+    fn test_gpu_sort_all_same() {
+        let sorter = match GpuSorter::new() {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Skipping GPU test: Metal not available");
+                return;
+            }
+        };
+
+        let size = 4096;
+        let mut data: Vec<u32> = vec![42; size];
+        let expected = data.clone();
+
+        sorter.sort(&mut data).unwrap();
+        assert!(is_sorted(&data));
+        assert_eq!(data, expected);
     }
 }
