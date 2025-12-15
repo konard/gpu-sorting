@@ -598,7 +598,6 @@ kernel void bitonic_merge_local(
         }
 
         /// Get information about the GPU device.
-        #[allow(dead_code)]
         pub fn device_info(&self) -> String {
             format!(
                 "Device: {}, Max threads per threadgroup: {}, Local sort size: {}",
@@ -636,6 +635,12 @@ impl GpuSorter {
     #[allow(dead_code)]
     pub fn sort(&self, _data: &mut [u32]) -> Result<(), String> {
         Err("GPU sorting via Metal is only available on macOS.".to_string())
+    }
+
+    /// Get information about the GPU device.
+    #[allow(dead_code)]
+    pub fn device_info(&self) -> String {
+        "N/A (Metal not available on this platform)".to_string()
     }
 }
 
