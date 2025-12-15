@@ -50,6 +50,10 @@ inline void compare_and_swap(
 ///
 /// This kernel performs the ENTIRE bitonic sort sequence for its local block,
 /// executing all log2(LOCAL_SIZE) stages within a single dispatch.
+///
+/// IMPORTANT: For proper bitonic merge, even-indexed blocks are sorted ascending,
+/// odd-indexed blocks are sorted descending. This creates the bitonic property
+/// needed for the global merge phase.
 kernel void bitonic_sort_local(
     device uint *data [[buffer(0)]],
     constant uint &array_size [[buffer(1)]],
@@ -62,6 +66,10 @@ kernel void bitonic_sort_local(
     // Each thread handles 2 elements
     uint local_size = tg_size * 2;
     uint block_start = tgid * local_size;
+
+    // Determine if this block should be sorted ascending or descending
+    // based on its global position (for proper bitonic sequence)
+    bool block_ascending = (tgid % 2) == 0;
 
     // Load two elements per thread into shared memory
     uint idx1 = tid * 2;
@@ -94,7 +102,9 @@ kernel void bitonic_sort_local(
 
             if (right_idx < local_size) {
                 uint block_idx = left_idx / block_size;
-                bool ascending = (block_idx % 2) == 0;
+                // XOR with block_ascending to flip direction for odd-indexed global blocks
+                bool local_ascending = (block_idx % 2) == 0;
+                bool ascending = block_ascending ? local_ascending : !local_ascending;
 
                 uint left_val = local_data[left_idx];
                 uint right_val = local_data[right_idx];
@@ -509,8 +519,10 @@ kernel void bitonic_merge_local(
                 for substage in 0..=stage {
                     let comparison_distance = block_size >> substage;
 
-                    // If comparison distance fits in local memory, use local merge
-                    if comparison_distance as usize <= local_sort_size {
+                    // If comparison distance fits within local memory (strictly less than local_sort_size),
+                    // use local merge. When comparison_distance == local_sort_size, we're at the
+                    // boundary and need global operations.
+                    if (comparison_distance as usize) < local_sort_size {
                         // Use local merge kernel for all remaining substages of this stage
                         let encoder = command_buffer.new_compute_command_encoder();
                         encoder.set_compute_pipeline_state(&self.local_merge_pipeline);
