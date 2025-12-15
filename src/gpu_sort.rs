@@ -499,22 +499,9 @@ kernel void bitonic_merge_local(
             let num_stages = (n as f64).log2() as u32;
             let local_stages = (local_sort_size as f64).log2() as u32;
 
-            // Pre-allocate parameter buffers that we'll reuse
-            let mut param_buffer1 = self.device.new_buffer(
-                mem::size_of::<u32>() as u64,
-                MTLResourceOptions::StorageModeShared,
-            );
-            let mut param_buffer2 = self.device.new_buffer(
-                mem::size_of::<u32>() as u64,
-                MTLResourceOptions::StorageModeShared,
-            );
-
             // Process stages where block_size > local_sort_size
             for stage in local_stages..num_stages {
                 let block_size = 2u32 << stage;
-
-                // Create a command buffer for this stage (batching multiple substages)
-                let command_buffer = self.command_queue.new_command_buffer();
 
                 for substage in 0..=stage {
                     let comparison_distance = block_size >> substage;
@@ -524,20 +511,25 @@ kernel void bitonic_merge_local(
                     // boundary and need global operations.
                     if (comparison_distance as usize) < local_sort_size {
                         // Use local merge kernel for all remaining substages of this stage
+                        let command_buffer = self.command_queue.new_command_buffer();
                         let encoder = command_buffer.new_compute_command_encoder();
                         encoder.set_compute_pipeline_state(&self.local_merge_pipeline);
 
-                        // Update parameter buffers
-                        let block_size_ptr = param_buffer1.contents() as *mut u32;
-                        let max_local_dist_ptr = param_buffer2.contents() as *mut u32;
-                        unsafe {
-                            *block_size_ptr = block_size;
-                            *max_local_dist_ptr = comparison_distance;
-                        }
+                        // Create parameter buffers for this dispatch
+                        let block_size_buffer = self.device.new_buffer_with_data(
+                            &block_size as *const u32 as *const _,
+                            mem::size_of::<u32>() as u64,
+                            MTLResourceOptions::StorageModeShared,
+                        );
+                        let max_local_dist_buffer = self.device.new_buffer_with_data(
+                            &comparison_distance as *const u32 as *const _,
+                            mem::size_of::<u32>() as u64,
+                            MTLResourceOptions::StorageModeShared,
+                        );
 
                         encoder.set_buffer(0, Some(&buffer), 0);
-                        encoder.set_buffer(1, Some(&param_buffer1), 0);
-                        encoder.set_buffer(2, Some(&param_buffer2), 0);
+                        encoder.set_buffer(1, Some(&block_size_buffer), 0);
+                        encoder.set_buffer(2, Some(&max_local_dist_buffer), 0);
                         encoder.set_buffer(3, Some(&array_size_buffer), 0);
                         encoder.set_threadgroup_memory_length(0, threadgroup_mem_size);
 
@@ -548,24 +540,32 @@ kernel void bitonic_merge_local(
                         encoder.dispatch_threads(grid_size, threadgroup_size);
                         encoder.end_encoding();
 
+                        command_buffer.commit();
+                        command_buffer.wait_until_completed();
+
                         // Local merge handles all remaining substages, so break
                         break;
                     } else {
                         // Use global merge kernel
+                        let command_buffer = self.command_queue.new_command_buffer();
                         let encoder = command_buffer.new_compute_command_encoder();
                         encoder.set_compute_pipeline_state(&self.global_merge_pipeline);
 
-                        // Update parameter buffers
-                        let block_size_ptr = param_buffer1.contents() as *mut u32;
-                        let comp_dist_ptr = param_buffer2.contents() as *mut u32;
-                        unsafe {
-                            *block_size_ptr = block_size;
-                            *comp_dist_ptr = comparison_distance;
-                        }
+                        // Create parameter buffers for this dispatch
+                        let block_size_buffer = self.device.new_buffer_with_data(
+                            &block_size as *const u32 as *const _,
+                            mem::size_of::<u32>() as u64,
+                            MTLResourceOptions::StorageModeShared,
+                        );
+                        let comp_dist_buffer = self.device.new_buffer_with_data(
+                            &comparison_distance as *const u32 as *const _,
+                            mem::size_of::<u32>() as u64,
+                            MTLResourceOptions::StorageModeShared,
+                        );
 
                         encoder.set_buffer(0, Some(&buffer), 0);
-                        encoder.set_buffer(1, Some(&param_buffer1), 0);
-                        encoder.set_buffer(2, Some(&param_buffer2), 0);
+                        encoder.set_buffer(1, Some(&block_size_buffer), 0);
+                        encoder.set_buffer(2, Some(&comp_dist_buffer), 0);
                         encoder.set_buffer(3, Some(&array_size_buffer), 0);
 
                         let num_threads = n / 2;
@@ -579,11 +579,11 @@ kernel void bitonic_merge_local(
 
                         encoder.dispatch_threads(grid_size, threadgroup_size);
                         encoder.end_encoding();
+
+                        command_buffer.commit();
+                        command_buffer.wait_until_completed();
                     }
                 }
-
-                command_buffer.commit();
-                command_buffer.wait_until_completed();
             }
 
             // Copy result back to CPU
