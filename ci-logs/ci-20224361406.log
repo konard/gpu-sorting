@@ -1,0 +1,87 @@
+lint	Set up job	﻿2025-12-15T07:45:01.8173806Z Current runner version: '2.329.0'
+lint	Set up job	2025-12-15T07:45:01.8199805Z ##[group]Runner Image Provisioner
+lint	Set up job	2025-12-15T07:45:01.8200689Z Hosted Compute Agent
+lint	Set up job	2025-12-15T07:45:01.8201290Z Version: 20251202.455
+lint	Set up job	2025-12-15T07:45:01.8201868Z Commit: 6c10caca4910e198df60de23adf20ad317c474e3
+lint	Set up job	2025-12-15T07:45:01.8203041Z Build Date: 2025-12-02T15:56:59Z
+lint	Set up job	2025-12-15T07:45:01.8203752Z Worker ID: {7f54bc6b-e6aa-4e77-b4dd-428dbbc0edb2}
+lint	Set up job	2025-12-15T07:45:01.8204491Z ##[endgroup]
+lint	Set up job	2025-12-15T07:45:01.8204982Z ##[group]Operating System
+lint	Set up job	2025-12-15T07:45:01.8205627Z Ubuntu
+lint	Set up job	2025-12-15T07:45:01.8206117Z 24.04.3
+lint	Set up job	2025-12-15T07:45:01.8206534Z LTS
+lint	Set up job	2025-12-15T07:45:01.8207082Z ##[endgroup]
+lint	Set up job	2025-12-15T07:45:01.8207585Z ##[group]Runner Image
+lint	Set up job	2025-12-15T07:45:01.8208115Z Image: ubuntu-24.04
+lint	Set up job	2025-12-15T07:45:01.8208666Z Version: 20251208.163.1
+lint	Set up job	2025-12-15T07:45:01.8209710Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20251208.163/images/ubuntu/Ubuntu2404-Readme.md
+lint	Set up job	2025-12-15T07:45:01.8211103Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20251208.163
+lint	Set up job	2025-12-15T07:45:01.8212691Z ##[endgroup]
+lint	Set up job	2025-12-15T07:45:01.8213838Z ##[group]GITHUB_TOKEN Permissions
+lint	Set up job	2025-12-15T07:45:01.8216002Z Contents: read
+lint	Set up job	2025-12-15T07:45:01.8216599Z Metadata: read
+lint	Set up job	2025-12-15T07:45:01.8217217Z Packages: read
+lint	Set up job	2025-12-15T07:45:01.8217701Z ##[endgroup]
+lint	Set up job	2025-12-15T07:45:01.8220114Z Secret source: Actions
+lint	Set up job	2025-12-15T07:45:01.8221186Z Prepare workflow directory
+lint	Set up job	2025-12-15T07:45:01.8614592Z Prepare all required actions
+lint	Set up job	2025-12-15T07:45:01.8652238Z Getting action download info
+lint	Set up job	2025-12-15T07:45:02.3256319Z ##[error]Unable to resolve action dtolnay/rust-action, repository not found
+build-linux	Set up job	﻿2025-12-15T07:45:01.9428539Z Current runner version: '2.329.0'
+build-linux	Set up job	2025-12-15T07:45:01.9453706Z ##[group]Runner Image Provisioner
+build-linux	Set up job	2025-12-15T07:45:01.9455046Z Hosted Compute Agent
+build-linux	Set up job	2025-12-15T07:45:01.9455615Z Version: 20251202.455
+build-linux	Set up job	2025-12-15T07:45:01.9456167Z Commit: 6c10caca4910e198df60de23adf20ad317c474e3
+build-linux	Set up job	2025-12-15T07:45:01.9456936Z Build Date: 2025-12-02T15:56:59Z
+build-linux	Set up job	2025-12-15T07:45:01.9457553Z Worker ID: {bca886d8-891c-4cb3-bcc7-367f9c71ac1a}
+build-linux	Set up job	2025-12-15T07:45:01.9458253Z ##[endgroup]
+build-linux	Set up job	2025-12-15T07:45:01.9458800Z ##[group]Operating System
+build-linux	Set up job	2025-12-15T07:45:01.9459375Z Ubuntu
+build-linux	Set up job	2025-12-15T07:45:01.9459812Z 24.04.3
+build-linux	Set up job	2025-12-15T07:45:01.9460312Z LTS
+build-linux	Set up job	2025-12-15T07:45:01.9460760Z ##[endgroup]
+build-linux	Set up job	2025-12-15T07:45:01.9461236Z ##[group]Runner Image
+build-linux	Set up job	2025-12-15T07:45:01.9461811Z Image: ubuntu-24.04
+build-linux	Set up job	2025-12-15T07:45:01.9462279Z Version: 20251208.163.1
+build-linux	Set up job	2025-12-15T07:45:01.9463287Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20251208.163/images/ubuntu/Ubuntu2404-Readme.md
+build-linux	Set up job	2025-12-15T07:45:01.9464828Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20251208.163
+build-linux	Set up job	2025-12-15T07:45:01.9466015Z ##[endgroup]
+build-linux	Set up job	2025-12-15T07:45:01.9467119Z ##[group]GITHUB_TOKEN Permissions
+build-linux	Set up job	2025-12-15T07:45:01.9469112Z Contents: read
+build-linux	Set up job	2025-12-15T07:45:01.9469742Z Metadata: read
+build-linux	Set up job	2025-12-15T07:45:01.9470219Z Packages: read
+build-linux	Set up job	2025-12-15T07:45:01.9470705Z ##[endgroup]
+build-linux	Set up job	2025-12-15T07:45:01.9472924Z Secret source: Actions
+build-linux	Set up job	2025-12-15T07:45:01.9473751Z Prepare workflow directory
+build-linux	Set up job	2025-12-15T07:45:01.9862342Z Prepare all required actions
+build-linux	Set up job	2025-12-15T07:45:01.9902717Z Getting action download info
+build-linux	Set up job	2025-12-15T07:45:02.4881668Z ##[error]Unable to resolve action dtolnay/rust-action, repository not found
+build-macos	Set up job	﻿2025-12-15T07:46:26.8799840Z Current runner version: '2.329.0'
+build-macos	Set up job	2025-12-15T07:46:26.8819970Z ##[group]Runner Image Provisioner
+build-macos	Set up job	2025-12-15T07:46:26.8820460Z Hosted Compute Agent
+build-macos	Set up job	2025-12-15T07:46:26.8820800Z Version: 20251211.462
+build-macos	Set up job	2025-12-15T07:46:26.8821190Z Commit: 6cbad8c2bb55d58165063d031ccabf57e2d2db61
+build-macos	Set up job	2025-12-15T07:46:26.8821630Z Build Date: 2025-12-11T16:28:49Z
+build-macos	Set up job	2025-12-15T07:46:26.8822040Z Worker ID: {61278be7-0bd5-4b33-9b02-a4c766773bb4}
+build-macos	Set up job	2025-12-15T07:46:26.8822470Z ##[endgroup]
+build-macos	Set up job	2025-12-15T07:46:26.8822890Z ##[group]Operating System
+build-macos	Set up job	2025-12-15T07:46:26.8823290Z macOS
+build-macos	Set up job	2025-12-15T07:46:26.8823580Z 15.7.2
+build-macos	Set up job	2025-12-15T07:46:26.8823860Z 24G325
+build-macos	Set up job	2025-12-15T07:46:26.8824150Z ##[endgroup]
+build-macos	Set up job	2025-12-15T07:46:26.8824450Z ##[group]Runner Image
+build-macos	Set up job	2025-12-15T07:46:26.8824840Z Image: macos-15-arm64
+build-macos	Set up job	2025-12-15T07:46:26.8825190Z Version: 20251210.0068.1
+build-macos	Set up job	2025-12-15T07:46:26.8827400Z Included Software: https://github.com/actions/runner-images/blob/macos-15-arm64/20251210.0068/images/macos/macos-15-arm64-Readme.md
+build-macos	Set up job	2025-12-15T07:46:26.8828370Z Image Release: https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20251210.0068
+build-macos	Set up job	2025-12-15T07:46:26.8829190Z ##[endgroup]
+build-macos	Set up job	2025-12-15T07:46:26.8829890Z ##[group]GITHUB_TOKEN Permissions
+build-macos	Set up job	2025-12-15T07:46:26.8830950Z Contents: read
+build-macos	Set up job	2025-12-15T07:46:26.8831260Z Metadata: read
+build-macos	Set up job	2025-12-15T07:46:26.8831570Z Packages: read
+build-macos	Set up job	2025-12-15T07:46:26.8831880Z ##[endgroup]
+build-macos	Set up job	2025-12-15T07:46:26.8833270Z Secret source: Actions
+build-macos	Set up job	2025-12-15T07:46:26.8833670Z Prepare workflow directory
+build-macos	Set up job	2025-12-15T07:46:26.9138480Z Prepare all required actions
+build-macos	Set up job	2025-12-15T07:46:26.9166240Z Getting action download info
+build-macos	Set up job	2025-12-15T07:46:27.1508880Z ##[error]Unable to resolve action dtolnay/rust-action, repository not found
