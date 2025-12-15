@@ -1,0 +1,25 @@
+[package]
+name = "gpu-sorting"
+version = "0.1.0"
+edition = "2021"
+description = "A proof of concept comparing CPU vs GPU sorting performance on Apple Silicon"
+license = "Unlicense"
+repository = "https://github.com/konard/gpu-sorting"
+keywords = ["gpu", "sorting", "metal", "apple-silicon", "benchmark"]
+
+[dependencies]
+rand = "0.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.32"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "sort_benchmark"
+harness = false
+
+[[bin]]
+name = "gpu-sorting"
+path = "src/main.rs"
