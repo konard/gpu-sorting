@@ -27,7 +27,11 @@ fn main() {
     // Ensure array size is a power of 2 for bitonic sort
     let array_size = array_size.next_power_of_two();
 
-    println!("Array size: {} elements ({} MB)", array_size, array_size * 4 / 1_000_000);
+    println!(
+        "Array size: {} elements ({} MB)",
+        array_size,
+        array_size * 4 / 1_000_000
+    );
 
     // Generate random data
     println!("\nGenerating random data...");
@@ -40,7 +44,10 @@ fn main() {
     let cpu_start = Instant::now();
     cpu_sort::sort_unstable(&mut cpu_data);
     let cpu_duration = cpu_start.elapsed();
-    println!("CPU sort time: {:.3} ms", cpu_duration.as_secs_f64() * 1000.0);
+    println!(
+        "CPU sort time: {:.3} ms",
+        cpu_duration.as_secs_f64() * 1000.0
+    );
 
     // Verify CPU sort
     assert!(cpu_sort::is_sorted(&cpu_data), "CPU sort failed!");
@@ -55,7 +62,10 @@ fn main() {
             match sorter.sort(&mut gpu_data) {
                 Ok(()) => {
                     let gpu_duration = gpu_start.elapsed();
-                    println!("GPU sort time: {:.3} ms", gpu_duration.as_secs_f64() * 1000.0);
+                    println!(
+                        "GPU sort time: {:.3} ms",
+                        gpu_duration.as_secs_f64() * 1000.0
+                    );
 
                     // Verify GPU sort
                     if cpu_sort::is_sorted(&gpu_data) {
@@ -87,7 +97,9 @@ fn main() {
         }
         Err(e) => {
             println!("Failed to initialize GPU sorter: {}", e);
-            println!("Note: GPU sorting requires macOS with Metal support (Apple Silicon recommended)");
+            println!(
+                "Note: GPU sorting requires macOS with Metal support (Apple Silicon recommended)"
+            );
         }
     }
 
@@ -104,14 +116,14 @@ fn run_benchmark() {
     println!("====================================\n");
 
     let sizes: Vec<usize> = vec![
-        1 << 10,  // 1K
-        1 << 12,  // 4K
-        1 << 14,  // 16K
-        1 << 16,  // 64K
-        1 << 18,  // 256K
-        1 << 20,  // 1M
-        1 << 22,  // 4M
-        1 << 24,  // 16M
+        1 << 10, // 1K
+        1 << 12, // 4K
+        1 << 14, // 16K
+        1 << 16, // 64K
+        1 << 18, // 256K
+        1 << 20, // 1M
+        1 << 22, // 4M
+        1 << 24, // 16M
     ];
 
     let gpu_sorter = match gpu_sort::GpuSorter::new() {
@@ -122,7 +134,10 @@ fn run_benchmark() {
         }
     };
 
-    println!("{:>12} | {:>12} | {:>12} | {:>10}", "Size", "CPU (ms)", "GPU (ms)", "Speedup");
+    println!(
+        "{:>12} | {:>12} | {:>12} | {:>10}",
+        "Size", "CPU (ms)", "GPU (ms)", "Speedup"
+    );
     println!("{:-<12}-+-{:-<12}-+-{:-<12}-+-{:-<10}", "", "", "", "");
 
     let mut rng = rand::thread_rng();
@@ -151,6 +166,9 @@ fn run_benchmark() {
             ("N/A".to_string(), "N/A".to_string())
         };
 
-        println!("{:>12} | {:>12.3} | {:>12} | {:>10}", size, cpu_ms, gpu_ms, speedup);
+        println!(
+            "{:>12} | {:>12.3} | {:>12} | {:>10}",
+            size, cpu_ms, gpu_ms, speedup
+        );
     }
 }

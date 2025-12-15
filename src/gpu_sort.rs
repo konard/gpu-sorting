@@ -63,8 +63,9 @@ kernel void bitonic_sort_step(
         /// Returns an error if Metal is not available or initialization fails.
         pub fn new() -> Result<Self, String> {
             // Get the default Metal device
-            let device = Device::system_default()
-                .ok_or_else(|| "No Metal device found. Metal is only available on macOS and iOS.")?;
+            let device = Device::system_default().ok_or_else(|| {
+                "No Metal device found. Metal is only available on macOS and iOS."
+            })?;
 
             println!("Using GPU: {}", device.name());
 
@@ -97,8 +98,7 @@ kernel void bitonic_sort_step(
         /// Create GPU sorter from a pre-compiled metallib file.
         #[allow(dead_code)]
         pub fn from_metallib(path: &PathBuf) -> Result<Self, String> {
-            let device = Device::system_default()
-                .ok_or_else(|| "No Metal device found")?;
+            let device = Device::system_default().ok_or_else(|| "No Metal device found")?;
 
             let command_queue = device.new_command_queue();
 
@@ -236,7 +236,10 @@ impl GpuSorter {
     ///
     /// On non-macOS platforms, this always returns an error.
     pub fn new() -> Result<Self, String> {
-        Err("GPU sorting via Metal is only available on macOS. This platform is not supported.".to_string())
+        Err(
+            "GPU sorting via Metal is only available on macOS. This platform is not supported."
+                .to_string(),
+        )
     }
 
     /// Sort the given data in-place using GPU bitonic sort.
