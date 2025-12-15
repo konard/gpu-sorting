@@ -252,6 +252,7 @@ kernel void bitonic_merge_local(
     /// Size of threadgroup for local sorting (1024 threads handle 2048 elements)
     const THREADGROUP_SIZE: usize = 1024;
     /// Number of elements sorted per threadgroup using shared memory
+    #[allow(dead_code)]
     const LOCAL_SORT_SIZE: usize = THREADGROUP_SIZE * 2;
 
     /// GPU Sorter using Metal for Apple Silicon
@@ -265,7 +266,8 @@ kernel void bitonic_merge_local(
         command_queue: CommandQueue,
         /// Pipeline for local sorting in threadgroup memory
         local_sort_pipeline: ComputePipelineState,
-        /// Pipeline for global comparison steps
+        /// Pipeline for global comparison steps (retained for potential future use)
+        #[allow(dead_code)]
         global_sort_pipeline: ComputePipelineState,
         /// Pipeline for global merge steps
         global_merge_pipeline: ComputePipelineState,
