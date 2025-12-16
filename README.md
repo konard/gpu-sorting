@@ -7,9 +7,20 @@ A proof of concept comparing CPU vs GPU sorting performance on Apple Silicon (M1
 This project answers the question: **Will GPU sorting be faster than CPU sorting, and under what conditions?**
 
 It implements:
-- **CPU Sorting**: Using Rust's built-in `sort_unstable` (pattern-defeating quicksort) - O(n log n)
+
+**GPU Algorithms:**
 - **GPU Bitonic Sort**: Using Metal compute shaders with bitonic sort algorithm - O(n log²n)
 - **GPU Radix Sort**: Using Metal compute shaders with DeviceRadixSort algorithm - O(n)
+
+**CPU Algorithms:**
+- **CPU pdqsort**: Rust's built-in `sort_unstable` (pattern-defeating quicksort) - O(n log n)
+- **CPU Radix Sort**: For fair comparison with GPU radix sort - O(n)
+- **CPU Bitonic Sort**: For fair comparison with GPU bitonic sort - O(n log²n)
+
+**Reporting:**
+- **Links Notation Reports**: Generate benchmark reports in [Links Notation](https://github.com/link-foundation/links-notation) format
+- **Markdown Reports**: Auto-generated performance comparison tables
+- **Web Visualizer**: Interactive React.js dashboard for viewing benchmark results
 
 ## Requirements
 
@@ -44,7 +55,28 @@ cargo run --release -- 1000000
 
 # Full benchmark across multiple sizes
 cargo run --release -- 1000000 --benchmark
+
+# Generate Links Notation and Markdown reports
+cargo run --release -- 1000000 --report
 ```
+
+### Generate Reports
+
+```bash
+# Run benchmark and save reports to data/reports/
+cargo run --release -- --report
+
+# Convert existing Lino report to Markdown
+cargo run --release --bin lino2md data/reports/benchmark_*.lino output.md
+```
+
+### View Reports in Browser
+
+Open `data/index.html` in your browser to visualize benchmark results interactively. The web visualizer can:
+- Parse Links Notation benchmark reports
+- Display performance charts with logarithmic scale
+- Show data tables and fair comparisons
+- Calculate GPU vs CPU speedup ratios
 
 ### Run Criterion Benchmarks
 
@@ -114,19 +146,40 @@ OneSweep uses "chained-scan-with-decoupled-lookback" which provides ~10% better 
 ```
 gpu-sorting/
 ├── src/
-│   ├── main.rs           # Main benchmark runner
-│   ├── cpu_sort.rs       # CPU sorting implementation
-│   ├── gpu_sort.rs       # Metal GPU bitonic sort implementation
-│   └── gpu_radix_sort.rs # Metal GPU radix sort implementation
+│   ├── main.rs             # Main benchmark runner
+│   ├── cpu_sort.rs         # CPU pdqsort (standard library)
+│   ├── cpu_radix_sort.rs   # CPU radix sort for fair comparison
+│   ├── cpu_bitonic_sort.rs # CPU bitonic sort for fair comparison
+│   ├── gpu_sort.rs         # Metal GPU bitonic sort implementation
+│   ├── gpu_radix_sort.rs   # Metal GPU radix sort implementation
+│   ├── lino_report.rs      # Links Notation report generator
+│   └── bin/
+│       └── lino2md.rs      # CLI tool to convert Lino to Markdown
 ├── shaders/
 │   ├── bitonic_sort.metal  # Metal bitonic sort shaders
 │   └── radix_sort.metal    # Metal radix sort shaders
+├── data/
+│   ├── index.html          # React.js benchmark visualizer
+│   └── reports/            # Generated benchmark reports (.lino, .md)
 ├── benches/
 │   └── sort_benchmark.rs   # Criterion benchmarks
 ├── docs/
 │   └── case-studies/       # Performance analysis documentation
 └── Cargo.toml
 ```
+
+## Fair Algorithm Comparisons
+
+A key feature of this project is enabling **fair** performance comparisons:
+
+| Comparison | Why it's Fair |
+|------------|---------------|
+| GPU Radix vs CPU Radix | Same algorithm, different platform |
+| GPU Bitonic vs CPU Bitonic | Same algorithm, different platform |
+
+This answers the core question: **Does the GPU provide actual performance benefits for the same algorithm?**
+
+Cross-algorithm comparisons (GPU Radix vs CPU pdqsort) are also available but should be interpreted differently since they compare different algorithms with different theoretical complexities.
 
 ## Expected Results
 
@@ -186,6 +239,7 @@ Bitonic sort performs **13x more operations** than CPU's pdqsort. GPU parallelis
 - [GPUSorting by b0nes164](https://github.com/b0nes164/GPUSorting) - Reference implementation
 - [Linebender GPU Sorting Wiki](https://linebender.org/wiki/gpu/sorting/)
 - [CUB DeviceRadixSort](https://nvidia.github.io/cccl/cub/api/structcub_1_1DeviceRadixSort.html)
+- [Links Notation](https://github.com/link-foundation/links-notation) - Data format for benchmark reports
 
 ## License
 

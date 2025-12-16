@@ -1,17 +1,30 @@
 //! GPU Sorting Proof of Concept
 //!
 //! This application compares CPU and GPU sorting performance on Apple Silicon (M1-M3).
-//! It implements multiple GPU sorting algorithms:
+//! It implements multiple sorting algorithms for fair comparison:
+//!
+//! **GPU Algorithms:**
 //! - **Bitonic Sort**: O(n log²n) - comparison-based, requires power-of-2 sizes
 //! - **Radix Sort**: O(n) - linear time using DeviceRadixSort algorithm
 //!
-//! The CPU baseline uses Rust's pdqsort (pattern-defeating quicksort).
+//! **CPU Algorithms:**
+//! - **pdqsort**: O(n log n) - Rust's standard library unstable sort
+//! - **Radix Sort**: O(n) - for fair comparison with GPU radix sort
+//! - **Bitonic Sort**: O(n log²n) - for fair comparison with GPU bitonic sort
+//!
+//! The benchmark generates reports in Links Notation format for analysis.
 
+mod cpu_bitonic_sort;
+mod cpu_radix_sort;
 mod cpu_sort;
 mod gpu_radix_sort;
 mod gpu_sort;
+mod lino_report;
 
+use lino_report::{BenchmarkReport, BenchmarkResult, SystemInfo};
 use rand::Rng;
+use std::fs;
+use std::path::Path;
 use std::time::Instant;
 
 /// Default array size for benchmarking
@@ -21,7 +34,7 @@ fn main() {
     println!("GPU Sorting Proof of Concept");
     println!("=============================\n");
 
-    // Parse command line arguments for array size
+    // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
     let array_size = if args.len() > 1 {
         args[1].parse().unwrap_or(DEFAULT_ARRAY_SIZE)
@@ -29,7 +42,11 @@ fn main() {
         DEFAULT_ARRAY_SIZE
     };
 
-    // For bitonic sort, we need power of 2, but for radix sort we don't
+    // Check for benchmark mode
+    let benchmark_mode = args.iter().any(|a| a == "--benchmark");
+    let generate_report = args.iter().any(|a| a == "--report");
+
+    // For bitonic sort, we need power of 2
     let bitonic_array_size = array_size.next_power_of_two();
 
     println!(
@@ -51,22 +68,52 @@ fn main() {
     let data: Vec<u32> = (0..array_size).map(|_| rng.gen()).collect();
     let data_bitonic: Vec<u32> = (0..bitonic_array_size).map(|_| rng.gen()).collect();
 
-    // CPU Sorting
+    // ========== CPU Sorting (pdqsort - standard library) ==========
     println!("\n--- CPU Sorting (std::sort unstable / pdqsort) ---");
     let mut cpu_data = data.clone();
     let cpu_start = Instant::now();
     cpu_sort::sort_unstable(&mut cpu_data);
     let cpu_duration = cpu_start.elapsed();
     println!(
-        "CPU sort time: {:.3} ms",
+        "CPU pdqsort time: {:.3} ms",
         cpu_duration.as_secs_f64() * 1000.0
     );
+    assert!(cpu_sort::is_sorted(&cpu_data), "CPU pdqsort failed!");
+    println!("CPU pdqsort verified: OK");
 
-    // Verify CPU sort
-    assert!(cpu_sort::is_sorted(&cpu_data), "CPU sort failed!");
-    println!("CPU sort verified: OK");
+    // ========== CPU Radix Sort ==========
+    println!("\n--- CPU Sorting (Radix Sort) ---");
+    let mut cpu_radix_data = data.clone();
+    let cpu_radix_start = Instant::now();
+    cpu_radix_sort::sort(&mut cpu_radix_data);
+    let cpu_radix_duration = cpu_radix_start.elapsed();
+    println!(
+        "CPU radix sort time: {:.3} ms",
+        cpu_radix_duration.as_secs_f64() * 1000.0
+    );
+    assert!(
+        cpu_radix_sort::is_sorted(&cpu_radix_data),
+        "CPU radix sort failed!"
+    );
+    println!("CPU radix sort verified: OK");
 
-    // GPU Bitonic Sorting
+    // ========== CPU Bitonic Sort ==========
+    println!("\n--- CPU Sorting (Bitonic Sort) ---");
+    let mut cpu_bitonic_data = data_bitonic.clone();
+    let cpu_bitonic_start = Instant::now();
+    cpu_bitonic_sort::sort(&mut cpu_bitonic_data);
+    let cpu_bitonic_duration = cpu_bitonic_start.elapsed();
+    println!(
+        "CPU bitonic sort time: {:.3} ms",
+        cpu_bitonic_duration.as_secs_f64() * 1000.0
+    );
+    assert!(
+        cpu_bitonic_sort::is_sorted(&cpu_bitonic_data),
+        "CPU bitonic sort failed!"
+    );
+    println!("CPU bitonic sort verified: OK");
+
+    // ========== GPU Bitonic Sorting ==========
     println!("\n--- GPU Sorting (Metal Bitonic Sort) ---");
     let gpu_bitonic_duration = match gpu_sort::GpuSorter::new() {
         Ok(sorter) => {
@@ -103,11 +150,12 @@ fn main() {
         }
     };
 
-    // GPU Radix Sorting
+    // ========== GPU Radix Sorting ==========
     println!("\n--- GPU Sorting (Metal Radix Sort - DeviceRadixSort) ---");
-    let gpu_radix_duration = match gpu_radix_sort::GpuRadixSorter::new() {
+    let (gpu_radix_duration, gpu_device_name) = match gpu_radix_sort::GpuRadixSorter::new() {
         Ok(sorter) => {
-            println!("Using GPU: {}", sorter.device_name());
+            let device_name = sorter.device_name();
+            println!("Using GPU: {}", device_name);
             let mut gpu_data = data.clone();
             let gpu_start = Instant::now();
             match sorter.sort(&mut gpu_data) {
@@ -130,32 +178,71 @@ fn main() {
                     } else {
                         println!("ERROR: GPU radix sort failed verification!");
                     }
-                    Some(gpu_duration)
+                    (Some(gpu_duration), device_name)
                 }
                 Err(e) => {
                     println!("GPU radix sort error: {}", e);
-                    None
+                    (None, device_name)
                 }
             }
         }
         Err(e) => {
             println!("Failed to initialize GPU radix sorter: {}", e);
-            None
+            (None, "Unknown".to_string())
         }
     };
 
-    // Performance comparison
+    // ========== Performance Comparison ==========
     println!("\n--- Performance Comparison ---");
 
     let cpu_ms = cpu_duration.as_secs_f64() * 1000.0;
+    let cpu_radix_ms = cpu_radix_duration.as_secs_f64() * 1000.0;
+    let cpu_bitonic_ms = cpu_bitonic_duration.as_secs_f64() * 1000.0;
 
+    // Fair comparisons first
+    println!("\n[Fair Algorithm Comparisons]");
+
+    // GPU Radix vs CPU Radix
+    if let Some(gpu_radix_dur) = gpu_radix_duration {
+        let gpu_radix_ms = gpu_radix_dur.as_secs_f64() * 1000.0;
+        let speedup = cpu_radix_ms / gpu_radix_ms;
+        if speedup > 1.0 {
+            println!("GPU Radix vs CPU Radix: GPU is {:.2}x faster", speedup);
+        } else {
+            println!(
+                "GPU Radix vs CPU Radix: CPU is {:.2}x faster",
+                1.0 / speedup
+            );
+        }
+    }
+
+    // GPU Bitonic vs CPU Bitonic
+    if let Some(gpu_bitonic_dur) = gpu_bitonic_duration {
+        let gpu_bitonic_ms = gpu_bitonic_dur.as_secs_f64() * 1000.0;
+        let speedup = cpu_bitonic_ms / gpu_bitonic_ms;
+        if speedup > 1.0 {
+            println!("GPU Bitonic vs CPU Bitonic: GPU is {:.2}x faster", speedup);
+        } else {
+            println!(
+                "GPU Bitonic vs CPU Bitonic: CPU is {:.2}x faster",
+                1.0 / speedup
+            );
+        }
+    }
+
+    println!("\n[Cross-Algorithm Comparisons]");
+
+    // GPU vs CPU standard library
     if let Some(bitonic_dur) = gpu_bitonic_duration {
         let bitonic_ms = bitonic_dur.as_secs_f64() * 1000.0;
         let speedup = cpu_ms / bitonic_ms;
         if speedup > 1.0 {
-            println!("GPU Bitonic vs CPU: GPU is {:.2}x faster", speedup);
+            println!("GPU Bitonic vs CPU pdqsort: GPU is {:.2}x faster", speedup);
         } else {
-            println!("GPU Bitonic vs CPU: CPU is {:.2}x faster", 1.0 / speedup);
+            println!(
+                "GPU Bitonic vs CPU pdqsort: CPU is {:.2}x faster",
+                1.0 / speedup
+            );
         }
     }
 
@@ -163,13 +250,33 @@ fn main() {
         let radix_ms = radix_dur.as_secs_f64() * 1000.0;
         let speedup = cpu_ms / radix_ms;
         if speedup > 1.0 {
-            println!("GPU Radix vs CPU: GPU is {:.2}x faster", speedup);
+            println!("GPU Radix vs CPU pdqsort: GPU is {:.2}x faster", speedup);
         } else {
-            println!("GPU Radix vs CPU: CPU is {:.2}x faster", 1.0 / speedup);
+            println!(
+                "GPU Radix vs CPU pdqsort: CPU is {:.2}x faster",
+                1.0 / speedup
+            );
         }
     }
 
+    // CPU algorithm comparisons
+    println!("\n[CPU Algorithm Comparisons]");
+    let pdq_vs_radix = cpu_ms / cpu_radix_ms;
+    if pdq_vs_radix > 1.0 {
+        println!(
+            "CPU Radix vs CPU pdqsort: Radix is {:.2}x faster",
+            pdq_vs_radix
+        );
+    } else {
+        println!(
+            "CPU Radix vs CPU pdqsort: pdqsort is {:.2}x faster",
+            1.0 / pdq_vs_radix
+        );
+    }
+
+    // GPU algorithm comparisons
     if let (Some(bitonic_dur), Some(radix_dur)) = (gpu_bitonic_duration, gpu_radix_duration) {
+        println!("\n[GPU Algorithm Comparisons]");
         let speedup = bitonic_dur.as_secs_f64() / radix_dur.as_secs_f64();
         if speedup > 1.0 {
             println!("GPU Radix vs GPU Bitonic: Radix is {:.2}x faster", speedup);
@@ -181,14 +288,14 @@ fn main() {
         }
     }
 
-    // Run multiple sizes for comprehensive benchmark
-    if args.len() > 2 && args[2] == "--benchmark" {
-        run_benchmark();
+    // Run comprehensive benchmark or generate report
+    if benchmark_mode || generate_report {
+        run_comprehensive_benchmark(generate_report, &gpu_device_name);
     }
 }
 
-/// Run benchmarks across multiple array sizes
-fn run_benchmark() {
+/// Run benchmarks across multiple array sizes and optionally generate reports
+fn run_comprehensive_benchmark(generate_report: bool, gpu_device: &str) {
     println!("\n\n====================================");
     println!("Running comprehensive benchmark...");
     println!("====================================\n");
@@ -220,12 +327,21 @@ fn run_benchmark() {
         }
     };
 
+    // Create report
+    let mut report = BenchmarkReport::new("Comprehensive GPU vs CPU sorting benchmark");
+    report.system_info = SystemInfo {
+        os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+        cpu: "Unknown (run on target machine)".to_string(),
+        gpu: Some(gpu_device.to_string()),
+        ram_gb: None,
+    };
+
     println!(
-        "{:>12} | {:>12} | {:>14} | {:>14} | {:>12} | {:>12}",
-        "Size", "CPU (ms)", "GPU Bitonic", "GPU Radix", "Bitonic/CPU", "Radix/CPU"
+        "{:>12} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10}",
+        "Size", "CPU pdq", "CPU Radix", "CPU Bit", "GPU Radix", "GPU Bit"
     );
     println!(
-        "{:-<12}-+-{:-<12}-+-{:-<14}-+-{:-<14}-+-{:-<12}-+-{:-<12}",
+        "{:-<12}-+-{:-<10}-+-{:-<10}-+-{:-<10}-+-{:-<10}-+-{:-<10}",
         "", "", "", "", "", ""
     );
 
@@ -234,46 +350,181 @@ fn run_benchmark() {
     for &size in &sizes {
         let data: Vec<u32> = (0..size).map(|_| rng.gen()).collect();
 
-        // CPU benchmark
+        // CPU pdqsort benchmark
         let mut cpu_data = data.clone();
         let cpu_start = Instant::now();
         cpu_sort::sort_unstable(&mut cpu_data);
         let cpu_ms = cpu_start.elapsed().as_secs_f64() * 1000.0;
 
-        // GPU Bitonic benchmark
-        let (bitonic_ms, bitonic_speedup) = if let Some(ref sorter) = gpu_bitonic_sorter {
-            let mut gpu_data = data.clone();
-            let gpu_start = Instant::now();
-            if sorter.sort(&mut gpu_data).is_ok() && cpu_sort::is_sorted(&gpu_data) {
-                let gpu_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
-                let speedup = cpu_ms / gpu_ms;
-                (format!("{:.3}", gpu_ms), format!("{:.2}x", speedup))
-            } else {
-                ("ERROR".to_string(), "N/A".to_string())
-            }
-        } else {
-            ("N/A".to_string(), "N/A".to_string())
-        };
+        report.add_result(BenchmarkResult {
+            algorithm: "cpu_pdqsort".to_string(),
+            platform: "cpu".to_string(),
+            array_size: size,
+            time_ms: cpu_ms,
+            verified: cpu_sort::is_sorted(&cpu_data),
+            device: None,
+        });
+
+        // CPU Radix benchmark
+        let mut cpu_radix_data = data.clone();
+        let cpu_radix_start = Instant::now();
+        cpu_radix_sort::sort(&mut cpu_radix_data);
+        let cpu_radix_ms = cpu_radix_start.elapsed().as_secs_f64() * 1000.0;
+
+        report.add_result(BenchmarkResult {
+            algorithm: "cpu_radix".to_string(),
+            platform: "cpu".to_string(),
+            array_size: size,
+            time_ms: cpu_radix_ms,
+            verified: cpu_radix_sort::is_sorted(&cpu_radix_data),
+            device: None,
+        });
+
+        // CPU Bitonic benchmark (power of 2 size)
+        let mut cpu_bitonic_data = data.clone();
+        let cpu_bitonic_start = Instant::now();
+        cpu_bitonic_sort::sort(&mut cpu_bitonic_data);
+        let cpu_bitonic_ms = cpu_bitonic_start.elapsed().as_secs_f64() * 1000.0;
+
+        report.add_result(BenchmarkResult {
+            algorithm: "cpu_bitonic".to_string(),
+            platform: "cpu".to_string(),
+            array_size: size,
+            time_ms: cpu_bitonic_ms,
+            verified: cpu_bitonic_sort::is_sorted(&cpu_bitonic_data),
+            device: None,
+        });
 
         // GPU Radix benchmark
-        let (radix_ms, radix_speedup) = if let Some(ref sorter) = gpu_radix_sorter {
+        let (gpu_radix_ms_str, _gpu_radix_ms) = if let Some(ref sorter) = gpu_radix_sorter {
             let mut gpu_data = data.clone();
             let gpu_start = Instant::now();
             if sorter.sort(&mut gpu_data).is_ok() && cpu_sort::is_sorted(&gpu_data) {
                 let gpu_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
-                let speedup = cpu_ms / gpu_ms;
-                (format!("{:.3}", gpu_ms), format!("{:.2}x", speedup))
+                report.add_result(BenchmarkResult {
+                    algorithm: "gpu_radix".to_string(),
+                    platform: "gpu".to_string(),
+                    array_size: size,
+                    time_ms: gpu_ms,
+                    verified: true,
+                    device: Some(gpu_device.to_string()),
+                });
+                (format!("{:.3}", gpu_ms), Some(gpu_ms))
             } else {
-                ("ERROR".to_string(), "N/A".to_string())
+                ("ERROR".to_string(), None)
             }
         } else {
-            ("N/A".to_string(), "N/A".to_string())
+            ("N/A".to_string(), None)
+        };
+
+        // GPU Bitonic benchmark
+        let (gpu_bitonic_ms_str, _gpu_bitonic_ms) = if let Some(ref sorter) = gpu_bitonic_sorter {
+            let mut gpu_data = data.clone();
+            let gpu_start = Instant::now();
+            if sorter.sort(&mut gpu_data).is_ok() && cpu_sort::is_sorted(&gpu_data) {
+                let gpu_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
+                report.add_result(BenchmarkResult {
+                    algorithm: "gpu_bitonic".to_string(),
+                    platform: "gpu".to_string(),
+                    array_size: size,
+                    time_ms: gpu_ms,
+                    verified: true,
+                    device: Some(gpu_device.to_string()),
+                });
+                (format!("{:.3}", gpu_ms), Some(gpu_ms))
+            } else {
+                ("ERROR".to_string(), None)
+            }
+        } else {
+            ("N/A".to_string(), None)
         };
 
         println!(
-            "{:>12} | {:>12.3} | {:>14} | {:>14} | {:>12} | {:>12}",
-            size, cpu_ms, bitonic_ms, radix_ms, bitonic_speedup, radix_speedup
+            "{:>12} | {:>10.3} | {:>10.3} | {:>10.3} | {:>10} | {:>10}",
+            size, cpu_ms, cpu_radix_ms, cpu_bitonic_ms, gpu_radix_ms_str, gpu_bitonic_ms_str
         );
+    }
+
+    println!("\n");
+
+    // Print fair comparison summary
+    println!("=== Fair Algorithm Comparisons (Same Algorithm, GPU vs CPU) ===\n");
+    println!(
+        "{:>12} | {:>20} | {:>22}",
+        "Size", "Radix (GPU/CPU)", "Bitonic (GPU/CPU)"
+    );
+    println!("{:-<12}-+-{:-<20}-+-{:-<22}", "", "", "");
+
+    for &size in &sizes {
+        let size_results: Vec<&BenchmarkResult> = report
+            .results
+            .iter()
+            .filter(|r| r.array_size == size)
+            .collect();
+
+        let radix_comparison = {
+            let gpu = size_results.iter().find(|r| r.algorithm == "gpu_radix");
+            let cpu = size_results.iter().find(|r| r.algorithm == "cpu_radix");
+            match (gpu, cpu) {
+                (Some(g), Some(c)) => {
+                    let speedup = c.time_ms / g.time_ms;
+                    if speedup > 1.0 {
+                        format!("GPU {:.2}x faster", speedup)
+                    } else {
+                        format!("CPU {:.2}x faster", 1.0 / speedup)
+                    }
+                }
+                _ => "N/A".to_string(),
+            }
+        };
+
+        let bitonic_comparison = {
+            let gpu = size_results.iter().find(|r| r.algorithm == "gpu_bitonic");
+            let cpu = size_results.iter().find(|r| r.algorithm == "cpu_bitonic");
+            match (gpu, cpu) {
+                (Some(g), Some(c)) => {
+                    let speedup = c.time_ms / g.time_ms;
+                    if speedup > 1.0 {
+                        format!("GPU {:.2}x faster", speedup)
+                    } else {
+                        format!("CPU {:.2}x faster", 1.0 / speedup)
+                    }
+                }
+                _ => "N/A".to_string(),
+            }
+        };
+
+        println!(
+            "{:>12} | {:>20} | {:>22}",
+            size, radix_comparison, bitonic_comparison
+        );
+    }
+
+    // Generate and save reports if requested
+    if generate_report {
+        // Create data/reports directory
+        let reports_dir = Path::new("data/reports");
+        if let Err(e) = fs::create_dir_all(reports_dir) {
+            eprintln!("Failed to create reports directory: {}", e);
+            return;
+        }
+
+        // Generate timestamp for filename
+        let timestamp = report.timestamp.replace([':', '-', 'T', 'Z'], "_");
+
+        // Save Lino report
+        let lino_path = reports_dir.join(format!("benchmark_{}.lino", timestamp));
+        match report.save_lino(&lino_path) {
+            Ok(()) => println!("\nLinks Notation report saved to: {}", lino_path.display()),
+            Err(e) => eprintln!("Failed to save Lino report: {}", e),
+        }
+
+        // Save Markdown report
+        let md_path = reports_dir.join(format!("benchmark_{}.md", timestamp));
+        match report.save_markdown(&md_path) {
+            Ok(()) => println!("Markdown report saved to: {}", md_path.display()),
+            Err(e) => eprintln!("Failed to save Markdown report: {}", e),
+        }
     }
 
     println!("\nNote: Speedup > 1.0x means GPU is faster than CPU");

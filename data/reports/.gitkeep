@@ -1,0 +1,2 @@
+# This file ensures the data/reports directory is tracked by git
+# Benchmark reports will be saved here when running with --report flag

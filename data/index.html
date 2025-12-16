@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Sorting Benchmark Visualizer</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            padding: 30px 0;
+            margin-bottom: 30px;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
+
+        header p {
+            color: #888;
+            font-size: 1.1rem;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+        }
+
+        .card h2 {
+            font-size: 1.4rem;
+            margin-bottom: 20px;
+            color: #00d4ff;
+        }
+
+        .file-input-area {
+            border: 2px dashed rgba(255, 255, 255, 0.2);
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .file-input-area:hover {
+            border-color: #00d4ff;
+            background: rgba(0, 212, 255, 0.05);
+        }
+
+        .file-input-area input {
+            display: none;
+        }
+
+        .btn {
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            color: white;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(0, 212, 255, 0.4);
+        }
+
+        .chart-container {
+            position: relative;
+            height: 400px;
+            margin-top: 20px;
+        }
+
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+
+        .results-table th,
+        .results-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .results-table th {
+            background: rgba(0, 212, 255, 0.1);
+            color: #00d4ff;
+            font-weight: 600;
+        }
+
+        .results-table tr:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .speedup-positive {
+            color: #4ade80;
+        }
+
+        .speedup-negative {
+            color: #f87171;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .stat-label {
+            color: #888;
+            margin-top: 8px;
+        }
+
+        .tab-container {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .tab.active {
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            border-color: transparent;
+        }
+
+        .tab:hover:not(.active) {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .lino-input {
+            width: 100%;
+            min-height: 200px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 16px;
+            color: #e0e0e0;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 14px;
+            resize: vertical;
+        }
+
+        .lino-input:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .error-message {
+            background: rgba(248, 113, 113, 0.1);
+            border: 1px solid #f87171;
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 20px;
+            color: #f87171;
+        }
+
+        .report-meta {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .meta-item {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .meta-label {
+            color: #888;
+            font-size: 0.9rem;
+            margin-bottom: 4px;
+        }
+
+        .meta-value {
+            color: #e0e0e0;
+            font-size: 1.1rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // Simple Links Notation parser for our benchmark format
+        function parseLinoReport(content) {
+            const report = {
+                timestamp: '',
+                description: '',
+                systemInfo: {
+                    os: '',
+                    cpu: '',
+                    gpu: '',
+                    ram_gb: null
+                },
+                results: [],
+                comparisons: []
+            };
+
+            let currentSize = null;
+            let currentAlgorithm = null;
+            let currentResult = null;
+            let inResults = false;
+            let inComparisons = false;
+            let inSystemInfo = false;
+
+            const lines = content.split('\n');
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+
+                // Parse sections
+                if (trimmed === 'system_info:') {
+                    inSystemInfo = true;
+                    inResults = false;
+                    inComparisons = false;
+                    continue;
+                }
+                if (trimmed === 'results:') {
+                    inResults = true;
+                    inSystemInfo = false;
+                    inComparisons = false;
+                    continue;
+                }
+                if (trimmed === 'comparisons:') {
+                    inComparisons = true;
+                    inResults = false;
+                    inSystemInfo = false;
+                    continue;
+                }
+
+                // Extract quoted values
+                const extractQuoted = (line, prefix) => {
+                    const match = line.match(new RegExp(`${prefix}\\s+'([^']*)'`));
+                    return match ? match[1] : null;
+                };
+
+                // Parse metadata
+                if (trimmed.startsWith("timestamp '")) {
+                    report.timestamp = extractQuoted(trimmed, 'timestamp') || '';
+                }
+                if (trimmed.startsWith("description '")) {
+                    report.description = extractQuoted(trimmed, 'description') || '';
+                }
+
+                // Parse system info
+                if (inSystemInfo) {
+                    if (trimmed.startsWith("os '")) {
+                        report.systemInfo.os = extractQuoted(trimmed, 'os') || '';
+                    }
+                    if (trimmed.startsWith("cpu '")) {
+                        report.systemInfo.cpu = extractQuoted(trimmed, 'cpu') || '';
+                    }
+                    if (trimmed.startsWith("gpu '")) {
+                        report.systemInfo.gpu = extractQuoted(trimmed, 'gpu') || '';
+                    }
+                    if (trimmed.startsWith('ram_gb ')) {
+                        report.systemInfo.ram_gb = parseFloat(trimmed.split(' ')[1]);
+                    }
+                }
+
+                // Parse results
+                if (inResults) {
+                    // Size blocks
+                    if (trimmed.startsWith('size_') && trimmed.endsWith(':')) {
+                        if (currentResult) {
+                            report.results.push(currentResult);
+                        }
+                        currentSize = parseInt(trimmed.match(/size_(\d+):/)[1]);
+                        currentAlgorithm = null;
+                        currentResult = null;
+                    }
+                    // Algorithm blocks
+                    else if (currentSize && (trimmed.startsWith('cpu_') || trimmed.startsWith('gpu_')) && trimmed.endsWith(':') && !trimmed.includes(' ')) {
+                        if (currentResult) {
+                            report.results.push(currentResult);
+                        }
+                        currentAlgorithm = trimmed.slice(0, -1);
+                        currentResult = {
+                            algorithm: currentAlgorithm,
+                            platform: currentAlgorithm.startsWith('cpu_') ? 'cpu' : 'gpu',
+                            array_size: currentSize,
+                            time_ms: 0,
+                            verified: false,
+                            device: null
+                        };
+                    }
+                    // Result properties
+                    else if (currentResult) {
+                        if (trimmed.startsWith('platform ')) {
+                            currentResult.platform = trimmed.split(' ')[1];
+                        } else if (trimmed.startsWith('time_ms ')) {
+                            currentResult.time_ms = parseFloat(trimmed.split(' ')[1]);
+                        } else if (trimmed.startsWith('verified ')) {
+                            currentResult.verified = trimmed.split(' ')[1] === 'true';
+                        } else if (trimmed.startsWith("device '")) {
+                            currentResult.device = extractQuoted(trimmed, 'device');
+                        }
+                    }
+                }
+            }
+
+            // Don't forget the last result
+            if (currentResult) {
+                report.results.push(currentResult);
+            }
+
+            return report;
+        }
+
+        function formatSize(size) {
+            if (size >= 1000000000) return `${(size / 1000000000).toFixed(0)}G`;
+            if (size >= 1000000) return `${(size / 1000000).toFixed(0)}M`;
+            if (size >= 1000) return `${(size / 1000).toFixed(0)}K`;
+            return size.toString();
+        }
+
+        function App() {
+            const [linoContent, setLinoContent] = useState('');
+            const [report, setReport] = useState(null);
+            const [error, setError] = useState(null);
+            const [activeTab, setActiveTab] = useState('chart');
+            const chartRef = useRef(null);
+            const chartInstance = useRef(null);
+
+            const handleFileUpload = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        setLinoContent(event.target.result);
+                    };
+                    reader.readAsText(file);
+                }
+            };
+
+            const parseReport = () => {
+                try {
+                    const parsed = parseLinoReport(linoContent);
+                    if (parsed.results.length === 0) {
+                        setError('No benchmark results found in the input');
+                        setReport(null);
+                    } else {
+                        setReport(parsed);
+                        setError(null);
+                    }
+                } catch (e) {
+                    setError(`Parse error: ${e.message}`);
+                    setReport(null);
+                }
+            };
+
+            useEffect(() => {
+                if (report && chartRef.current && activeTab === 'chart') {
+                    // Destroy existing chart
+                    if (chartInstance.current) {
+                        chartInstance.current.destroy();
+                    }
+
+                    // Get unique sizes and algorithms
+                    const sizes = [...new Set(report.results.map(r => r.array_size))].sort((a, b) => a - b);
+                    const algorithms = ['cpu_pdqsort', 'cpu_radix', 'cpu_bitonic', 'gpu_radix', 'gpu_bitonic'];
+
+                    const colors = {
+                        'cpu_pdqsort': '#60a5fa',
+                        'cpu_radix': '#34d399',
+                        'cpu_bitonic': '#a78bfa',
+                        'gpu_radix': '#f472b6',
+                        'gpu_bitonic': '#fbbf24'
+                    };
+
+                    const datasets = algorithms.map(algo => ({
+                        label: algo.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase()),
+                        data: sizes.map(size => {
+                            const result = report.results.find(r => r.algorithm === algo && r.array_size === size);
+                            return result ? result.time_ms : null;
+                        }),
+                        borderColor: colors[algo],
+                        backgroundColor: colors[algo] + '40',
+                        tension: 0.3,
+                        pointRadius: 5,
+                        pointHoverRadius: 8
+                    })).filter(ds => ds.data.some(d => d !== null));
+
+                    chartInstance.current = new Chart(chartRef.current, {
+                        type: 'line',
+                        data: {
+                            labels: sizes.map(formatSize),
+                            datasets
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: {
+                                    position: 'top',
+                                    labels: { color: '#e0e0e0' }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Sorting Time vs Array Size',
+                                    color: '#e0e0e0',
+                                    font: { size: 16 }
+                                }
+                            },
+                            scales: {
+                                x: {
+                                    title: {
+                                        display: true,
+                                        text: 'Array Size',
+                                        color: '#888'
+                                    },
+                                    ticks: { color: '#888' },
+                                    grid: { color: 'rgba(255,255,255,0.1)' }
+                                },
+                                y: {
+                                    type: 'logarithmic',
+                                    title: {
+                                        display: true,
+                                        text: 'Time (ms)',
+                                        color: '#888'
+                                    },
+                                    ticks: { color: '#888' },
+                                    grid: { color: 'rgba(255,255,255,0.1)' }
+                                }
+                            }
+                        }
+                    });
+                }
+            }, [report, activeTab]);
+
+            const getSpeedupClass = (speedup) => speedup > 1 ? 'speedup-positive' : 'speedup-negative';
+
+            const computeStats = () => {
+                if (!report) return null;
+
+                const sizes = [...new Set(report.results.map(r => r.array_size))];
+                const largestSize = Math.max(...sizes);
+
+                const gpuRadix = report.results.find(r => r.algorithm === 'gpu_radix' && r.array_size === largestSize);
+                const cpuRadix = report.results.find(r => r.algorithm === 'cpu_radix' && r.array_size === largestSize);
+                const cpuPdq = report.results.find(r => r.algorithm === 'cpu_pdqsort' && r.array_size === largestSize);
+
+                return {
+                    largestSize,
+                    gpuVsCpuRadix: gpuRadix && cpuRadix ? (cpuRadix.time_ms / gpuRadix.time_ms).toFixed(2) : null,
+                    gpuVsCpuPdq: gpuRadix && cpuPdq ? (cpuPdq.time_ms / gpuRadix.time_ms).toFixed(2) : null,
+                    fastestGpu: gpuRadix ? gpuRadix.time_ms.toFixed(2) : null,
+                    fastestCpu: cpuPdq ? cpuPdq.time_ms.toFixed(2) : null
+                };
+            };
+
+            const stats = computeStats();
+
+            return (
+                <div className="container">
+                    <header>
+                        <h1>GPU Sorting Benchmark Visualizer</h1>
+                        <p>Analyze and visualize benchmark results from Links Notation reports</p>
+                    </header>
+
+                    <div className="card">
+                        <h2>Load Benchmark Report</h2>
+                        <div className="file-input-area" onClick={() => document.getElementById('fileInput').click()}>
+                            <input
+                                type="file"
+                                id="fileInput"
+                                accept=".lino,.txt"
+                                onChange={handleFileUpload}
+                            />
+                            <p>Click to upload a .lino file or drag and drop</p>
+                            <p style={{color: '#666', marginTop: '10px'}}>Or paste Links Notation content below</p>
+                        </div>
+
+                        <textarea
+                            className="lino-input"
+                            placeholder="Paste Links Notation benchmark report here..."
+                            value={linoContent}
+                            onChange={(e) => setLinoContent(e.target.value)}
+                            style={{marginTop: '20px'}}
+                        />
+
+                        <button className="btn" onClick={parseReport} style={{marginTop: '16px'}}>
+                            Parse Report
+                        </button>
+
+                        {error && (
+                            <div className="error-message">
+                                {error}
+                            </div>
+                        )}
+                    </div>
+
+                    {report && (
+                        <>
+                            <div className="card">
+                                <h2>Report Information</h2>
+                                <div className="report-meta">
+                                    <div className="meta-item">
+                                        <span className="meta-label">Timestamp</span>
+                                        <span className="meta-value">{report.timestamp || 'N/A'}</span>
+                                    </div>
+                                    <div className="meta-item">
+                                        <span className="meta-label">Description</span>
+                                        <span className="meta-value">{report.description || 'N/A'}</span>
+                                    </div>
+                                    <div className="meta-item">
+                                        <span className="meta-label">Operating System</span>
+                                        <span className="meta-value">{report.systemInfo.os || 'N/A'}</span>
+                                    </div>
+                                    <div className="meta-item">
+                                        <span className="meta-label">GPU</span>
+                                        <span className="meta-value">{report.systemInfo.gpu || 'N/A'}</span>
+                                    </div>
+                                </div>
+
+                                {stats && (
+                                    <div className="stats-grid">
+                                        {stats.gpuVsCpuRadix && (
+                                            <div className="stat-card">
+                                                <div className="stat-value">{stats.gpuVsCpuRadix}x</div>
+                                                <div className="stat-label">GPU vs CPU Radix<br/>({formatSize(stats.largestSize)} elements)</div>
+                                            </div>
+                                        )}
+                                        {stats.gpuVsCpuPdq && (
+                                            <div className="stat-card">
+                                                <div className="stat-value">{stats.gpuVsCpuPdq}x</div>
+                                                <div className="stat-label">GPU Radix vs CPU pdqsort<br/>({formatSize(stats.largestSize)} elements)</div>
+                                            </div>
+                                        )}
+                                        {stats.fastestGpu && (
+                                            <div className="stat-card">
+                                                <div className="stat-value">{stats.fastestGpu}ms</div>
+                                                <div className="stat-label">GPU Radix Time<br/>({formatSize(stats.largestSize)} elements)</div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="card">
+                                <div className="tab-container">
+                                    <div
+                                        className={`tab ${activeTab === 'chart' ? 'active' : ''}`}
+                                        onClick={() => setActiveTab('chart')}
+                                    >
+                                        Performance Chart
+                                    </div>
+                                    <div
+                                        className={`tab ${activeTab === 'table' ? 'active' : ''}`}
+                                        onClick={() => setActiveTab('table')}
+                                    >
+                                        Data Table
+                                    </div>
+                                    <div
+                                        className={`tab ${activeTab === 'comparison' ? 'active' : ''}`}
+                                        onClick={() => setActiveTab('comparison')}
+                                    >
+                                        Fair Comparisons
+                                    </div>
+                                </div>
+
+                                {activeTab === 'chart' && (
+                                    <div className="chart-container">
+                                        <canvas ref={chartRef}></canvas>
+                                    </div>
+                                )}
+
+                                {activeTab === 'table' && (
+                                    <table className="results-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Size</th>
+                                                <th>Algorithm</th>
+                                                <th>Platform</th>
+                                                <th>Time (ms)</th>
+                                                <th>Verified</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {report.results.map((r, i) => (
+                                                <tr key={i}>
+                                                    <td>{formatSize(r.array_size)}</td>
+                                                    <td>{r.algorithm}</td>
+                                                    <td>{r.platform.toUpperCase()}</td>
+                                                    <td>{r.time_ms.toFixed(3)}</td>
+                                                    <td>{r.verified ? 'OK' : 'FAIL'}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                )}
+
+                                {activeTab === 'comparison' && (
+                                    <table className="results-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Size</th>
+                                                <th>Radix (GPU vs CPU)</th>
+                                                <th>Bitonic (GPU vs CPU)</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {[...new Set(report.results.map(r => r.array_size))].sort((a, b) => a - b).map(size => {
+                                                const gpuRadix = report.results.find(r => r.algorithm === 'gpu_radix' && r.array_size === size);
+                                                const cpuRadix = report.results.find(r => r.algorithm === 'cpu_radix' && r.array_size === size);
+                                                const gpuBitonic = report.results.find(r => r.algorithm === 'gpu_bitonic' && r.array_size === size);
+                                                const cpuBitonic = report.results.find(r => r.algorithm === 'cpu_bitonic' && r.array_size === size);
+
+                                                const radixSpeedup = gpuRadix && cpuRadix ? cpuRadix.time_ms / gpuRadix.time_ms : null;
+                                                const bitonicSpeedup = gpuBitonic && cpuBitonic ? cpuBitonic.time_ms / gpuBitonic.time_ms : null;
+
+                                                return (
+                                                    <tr key={size}>
+                                                        <td>{formatSize(size)}</td>
+                                                        <td className={radixSpeedup ? getSpeedupClass(radixSpeedup) : ''}>
+                                                            {radixSpeedup
+                                                                ? (radixSpeedup > 1
+                                                                    ? `GPU ${radixSpeedup.toFixed(2)}x faster`
+                                                                    : `CPU ${(1/radixSpeedup).toFixed(2)}x faster`)
+                                                                : 'N/A'}
+                                                        </td>
+                                                        <td className={bitonicSpeedup ? getSpeedupClass(bitonicSpeedup) : ''}>
+                                                            {bitonicSpeedup
+                                                                ? (bitonicSpeedup > 1
+                                                                    ? `GPU ${bitonicSpeedup.toFixed(2)}x faster`
+                                                                    : `CPU ${(1/bitonicSpeedup).toFixed(2)}x faster`)
+                                                                : 'N/A'}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                )}
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
