@@ -23,3 +23,7 @@ harness = false
 [[bin]]
 name = "gpu-sorting"
 path = "src/main.rs"
+
+[[bin]]
+name = "lino2md"
+path = "src/bin/lino2md.rs"
