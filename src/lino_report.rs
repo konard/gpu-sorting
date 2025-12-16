@@ -90,13 +90,28 @@ impl BenchmarkReport {
         // Report metadata
         writeln!(output, "benchmark_report:").unwrap();
         writeln!(output, "  timestamp '{}'", self.timestamp).unwrap();
-        writeln!(output, "  description '{}'", escape_lino_string(&self.description)).unwrap();
+        writeln!(
+            output,
+            "  description '{}'",
+            escape_lino_string(&self.description)
+        )
+        .unwrap();
 
         // System information
         writeln!(output).unwrap();
         writeln!(output, "system_info:").unwrap();
-        writeln!(output, "  os '{}'", escape_lino_string(&self.system_info.os)).unwrap();
-        writeln!(output, "  cpu '{}'", escape_lino_string(&self.system_info.cpu)).unwrap();
+        writeln!(
+            output,
+            "  os '{}'",
+            escape_lino_string(&self.system_info.os)
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "  cpu '{}'",
+            escape_lino_string(&self.system_info.cpu)
+        )
+        .unwrap();
         if let Some(ref gpu) = self.system_info.gpu {
             writeln!(output, "  gpu '{}'", escape_lino_string(gpu)).unwrap();
         }
@@ -150,7 +165,12 @@ impl BenchmarkReport {
                 let speedup = cpu.time_ms / gpu.time_ms;
                 writeln!(output, "    gpu_radix_vs_cpu_radix:").unwrap();
                 writeln!(output, "      speedup {:.2}", speedup).unwrap();
-                writeln!(output, "      faster {}", if speedup > 1.0 { "gpu" } else { "cpu" }).unwrap();
+                writeln!(
+                    output,
+                    "      faster {}",
+                    if speedup > 1.0 { "gpu" } else { "cpu" }
+                )
+                .unwrap();
             }
 
             // GPU Bitonic vs CPU Bitonic (fair comparison)
@@ -160,7 +180,12 @@ impl BenchmarkReport {
                 let speedup = cpu.time_ms / gpu.time_ms;
                 writeln!(output, "    gpu_bitonic_vs_cpu_bitonic:").unwrap();
                 writeln!(output, "      speedup {:.2}", speedup).unwrap();
-                writeln!(output, "      faster {}", if speedup > 1.0 { "gpu" } else { "cpu" }).unwrap();
+                writeln!(
+                    output,
+                    "      faster {}",
+                    if speedup > 1.0 { "gpu" } else { "cpu" }
+                )
+                .unwrap();
             }
 
             // GPU Radix vs CPU pdqsort (standard library comparison)
@@ -169,7 +194,12 @@ impl BenchmarkReport {
                 let speedup = cpu.time_ms / gpu.time_ms;
                 writeln!(output, "    gpu_radix_vs_cpu_pdqsort:").unwrap();
                 writeln!(output, "      speedup {:.2}", speedup).unwrap();
-                writeln!(output, "      faster {}", if speedup > 1.0 { "gpu" } else { "cpu" }).unwrap();
+                writeln!(
+                    output,
+                    "      faster {}",
+                    if speedup > 1.0 { "gpu" } else { "cpu" }
+                )
+                .unwrap();
             }
 
             // GPU Bitonic vs CPU pdqsort
@@ -177,7 +207,12 @@ impl BenchmarkReport {
                 let speedup = cpu.time_ms / gpu.time_ms;
                 writeln!(output, "    gpu_bitonic_vs_cpu_pdqsort:").unwrap();
                 writeln!(output, "      speedup {:.2}", speedup).unwrap();
-                writeln!(output, "      faster {}", if speedup > 1.0 { "gpu" } else { "cpu" }).unwrap();
+                writeln!(
+                    output,
+                    "      faster {}",
+                    if speedup > 1.0 { "gpu" } else { "cpu" }
+                )
+                .unwrap();
             }
 
             // GPU Radix vs GPU Bitonic
@@ -185,7 +220,12 @@ impl BenchmarkReport {
                 let speedup = bitonic.time_ms / radix.time_ms;
                 writeln!(output, "    gpu_radix_vs_gpu_bitonic:").unwrap();
                 writeln!(output, "      speedup {:.2}", speedup).unwrap();
-                writeln!(output, "      faster {}", if speedup > 1.0 { "radix" } else { "bitonic" }).unwrap();
+                writeln!(
+                    output,
+                    "      faster {}",
+                    if speedup > 1.0 { "radix" } else { "bitonic" }
+                )
+                .unwrap();
             }
 
             // CPU Radix vs CPU pdqsort
@@ -193,7 +233,12 @@ impl BenchmarkReport {
                 let speedup = pdqsort.time_ms / radix.time_ms;
                 writeln!(output, "    cpu_radix_vs_cpu_pdqsort:").unwrap();
                 writeln!(output, "      speedup {:.2}", speedup).unwrap();
-                writeln!(output, "      faster {}", if speedup > 1.0 { "radix" } else { "pdqsort" }).unwrap();
+                writeln!(
+                    output,
+                    "      faster {}",
+                    if speedup > 1.0 { "radix" } else { "pdqsort" }
+                )
+                .unwrap();
             }
         }
 
@@ -308,7 +353,11 @@ impl BenchmarkReport {
             "| Size | Radix (GPU/CPU Speedup) | Bitonic (GPU/CPU Speedup) |"
         )
         .unwrap();
-        writeln!(output, "|------|-------------------------|---------------------------|").unwrap();
+        writeln!(
+            output,
+            "|------|-------------------------|---------------------------|"
+        )
+        .unwrap();
 
         for size in &sizes {
             let size_results: Vec<&BenchmarkResult> = self
@@ -519,9 +568,7 @@ pub fn parse_lino_report(content: &str) -> Option<BenchmarkReport> {
                 report.results.push(result);
             }
 
-            let size_str = trimmed
-                .trim_start_matches("size_")
-                .trim_end_matches(':');
+            let size_str = trimmed.trim_start_matches("size_").trim_end_matches(':');
             current_size = size_str.parse().ok();
             _current_algorithm = None;
         }
