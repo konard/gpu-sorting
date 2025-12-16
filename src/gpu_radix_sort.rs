@@ -332,9 +332,9 @@ mod metal_impl {
                     // Index 1: shared_digits (THREADGROUP_SIZE = 256 uints)
                     // Index 2: digit_counts (RADIX_SIZE = 256 uints)
                     let threadgroup_mem = (THREADGROUP_SIZE * mem::size_of::<u32>()) as u64;
-                    encoder.set_threadgroup_memory_length(0, histogram_tg_mem);  // local_offsets (256)
-                    encoder.set_threadgroup_memory_length(1, threadgroup_mem);   // shared_digits (256)
-                    encoder.set_threadgroup_memory_length(2, histogram_tg_mem);  // digit_counts (256)
+                    encoder.set_threadgroup_memory_length(0, histogram_tg_mem); // local_offsets (256)
+                    encoder.set_threadgroup_memory_length(1, threadgroup_mem); // shared_digits (256)
+                    encoder.set_threadgroup_memory_length(2, histogram_tg_mem); // digit_counts (256)
 
                     let grid_size = MTLSize::new((num_threadgroups * tg_size) as u64, 1, 1);
                     let threadgroup_size = MTLSize::new(tg_size as u64, 1, 1);
