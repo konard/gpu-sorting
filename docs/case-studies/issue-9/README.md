@@ -229,49 +229,65 @@ This massive gap indicates compute-bound bottleneck, not memory-bound.
 
 ## Proposed Solutions
 
-### Solution 1: Parallel Scatter Implementation (High Priority)
+### Solution 1: Parallel Scatter Implementation (High Priority) ✅ IMPLEMENTED
 
-**Description**: Implement proper parallel scatter using warp-level multi-split.
+**Status**: Implemented in this PR
 
-**Expected Improvement**: 10-50x faster scatter kernel
+**Description**: Replaced the sequential scatter kernel with a parallel implementation using shared memory for ranking.
 
-**Implementation Approach**:
+**Implementation Details**:
+- All 256 threads now participate in scatter operations (was: only thread 0)
+- Uses shared memory to store digits from all threads in a batch
+- Each thread computes its rank by counting preceding threads with the same digit
+- All threads write to output in parallel
+
+**Expected Improvement**: 2-5x faster GPU radix sort overall
+
+**Actual Implementation** (in `shaders/radix_sort.metal`):
 
 ```metal
-// Proposed parallel scatter with ranking
-kernel void radix_scatter_parallel(
+kernel void radix_scatter(
     device const uint *keys_in [[buffer(0)]],
     device uint *keys_out [[buffer(1)]],
     device const uint *scatter_offsets [[buffer(2)]],
     constant uint &array_size [[buffer(3)]],
     constant uint &shift [[buffer(4)]],
-    threadgroup uint *local_offsets [[threadgroup(0)]],
-    threadgroup uint *local_ranks [[threadgroup(1)]],  // NEW: rank per key
+    threadgroup uint *local_offsets [[threadgroup(0)]],  // RADIX_SIZE uints
+    threadgroup uint *shared_digits [[threadgroup(1)]],  // THREADGROUP_SIZE uints
+    threadgroup uint *digit_counts [[threadgroup(2)]],   // RADIX_SIZE uints
     uint tid [[thread_index_in_threadgroup]],
     uint tgid [[threadgroup_position_in_grid]],
-    uint simd_lane [[thread_index_in_simdgroup]],
-    uint simd_id [[simdgroup_index_in_threadgroup]])
+    uint tg_size [[threads_per_threadgroup]])
 {
-    // 1. Each thread loads its key and computes digit
+    // ... batch processing loop
+
+    // Step 1: All threads load keys in parallel
     uint key = keys_in[global_idx];
     uint digit = (key >> shift) & RADIX_MASK;
 
-    // 2. Use simd_ballot to count matching digits in warp
-    // This is the "warp-level multi-split" technique
-    simd_vote match = simd_ballot(true); // All threads
-    uint rank = simd_prefix_exclusive_sum(match);
+    // Step 2: Store digits in shared memory
+    shared_digits[tid] = digit;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // 3. Compute global output position
-    uint output_idx = local_offsets[digit] + rank;
+    // Step 3: Each thread computes rank independently (parallel)
+    uint rank = 0;
+    for (uint i = 0; i < tid; i++) {
+        if (shared_digits[i] == digit) rank++;
+    }
 
-    // 4. Write in parallel
-    keys_out[output_idx] = key;
+    // Step 4: All threads write in parallel
+    uint base = local_offsets[digit];
+    uint out_idx = base + rank;
+    keys_out[out_idx] = key;
 }
 ```
+
+**Future Optimization**: Could further improve with SIMD ballot operations for O(1) rank computation.
 
 **References**:
 - [FidelityFX Sort](https://github.com/GPUOpen-Effects/FidelityFX-ParallelSort)
 - [b0nes164 GPUSorting](https://github.com/b0nes164/GPUSorting)
+- [Linebender GPU Sorting Wiki](https://linebender.org/wiki/gpu/sorting/)
 
 ### Solution 2: Use 4-bit Radix (Medium Priority)
 

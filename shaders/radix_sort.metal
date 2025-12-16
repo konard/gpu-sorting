@@ -123,18 +123,30 @@ kernel void radix_scatter_offsets(
 }
 
 // ===========================================================================
-// Pass 3: Scatter Kernel (Sequential approach for correctness)
+// Pass 3: Scatter Kernel (Parallel approach using local ranking)
 // ===========================================================================
-// This kernel processes keys sequentially within each threadgroup to ensure
-// stable sort. While not the most parallel, it guarantees correctness.
-// Performance can be improved later with more sophisticated ranking algorithms.
+// This kernel processes keys in parallel within each threadgroup.
+// All threads participate in loading, ranking, and scattering keys.
+//
+// Algorithm for each batch of 256 keys (one per thread):
+// 1. Each thread loads its key and computes its digit
+// 2. Store digits in shared memory for all threads to see
+// 3. Each thread counts how many preceding threads have the same digit (rank)
+// 4. Each thread writes its key to output at position: base_offset + rank
+// 5. Update base offsets for next batch using digit counts
+//
+// The key optimization is that all threads compute their ranks simultaneously
+// in parallel. The ranking loop is O(tid) per thread, averaging O(n/2) total
+// work across all threads, which is much better than sequential O(n) per key.
 kernel void radix_scatter(
     device const uint *keys_in [[buffer(0)]],
     device uint *keys_out [[buffer(1)]],
     device const uint *scatter_offsets [[buffer(2)]],
     constant uint &array_size [[buffer(3)]],
     constant uint &shift [[buffer(4)]],
-    threadgroup uint *local_offsets [[threadgroup(0)]],
+    threadgroup uint *local_offsets [[threadgroup(0)]],  // RADIX_SIZE uints for bucket offsets
+    threadgroup uint *shared_digits [[threadgroup(1)]],  // THREADGROUP_SIZE uints for digits
+    threadgroup uint *digit_counts [[threadgroup(2)]],   // RADIX_SIZE uints for batch counts
     uint tid [[thread_index_in_threadgroup]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tg_size [[threads_per_threadgroup]])
@@ -143,33 +155,70 @@ kernel void radix_scatter(
     uint block_end = min(block_start + KEYS_PER_THREADGROUP, array_size);
     uint block_size = block_end - block_start;
 
-    // Load scatter offsets for this threadgroup
+    // Load scatter offsets for this threadgroup into shared memory
     for (uint i = tid; i < RADIX_SIZE; i += tg_size) {
         local_offsets[i] = scatter_offsets[tgid * RADIX_SIZE + i];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Process keys in chunks - each chunk processes multiple keys in parallel
-    // but respects input order by processing thread 0's keys first, then thread 1, etc.
-    for (uint k = 0; k < KEYS_PER_THREAD; k++) {
-        // Process all threads' k-th keys
-        for (uint t = 0; t < tg_size; t++) {
-            uint local_idx = k * tg_size + t;
-            if (local_idx >= block_size) break;
+    // Process keys in batches of tg_size (256) keys
+    // Each batch is processed fully in parallel
+    for (uint batch = 0; batch < KEYS_PER_THREAD; batch++) {
+        uint local_idx = batch * tg_size + tid;
+        bool valid = (local_idx < block_size);
 
-            uint global_idx = block_start + local_idx;
-
-            // Only the designated thread does the work
-            if (tid == 0) {
-                uint key = keys_in[global_idx];
-                uint digit = (key >> shift) & RADIX_MASK;
-
-                uint out_idx = local_offsets[digit];
-                local_offsets[digit] = out_idx + 1;
-
-                keys_out[out_idx] = key;
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Initialize digit counts for this batch
+        for (uint d = tid; d < RADIX_SIZE; d += tg_size) {
+            digit_counts[d] = 0;
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Step 1: Each thread loads its key and computes digit
+        uint key = 0;
+        uint digit = RADIX_SIZE;  // Invalid marker for out-of-bounds threads
+        if (valid) {
+            uint global_idx = block_start + local_idx;
+            key = keys_in[global_idx];
+            digit = (key >> shift) & RADIX_MASK;
+        }
+
+        // Step 2: Store digit in shared memory for all threads to see
+        shared_digits[tid] = digit;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Step 3: Compute rank - count threads with same digit that come before this thread
+        // This is the key parallel operation - all threads compute their ranks simultaneously
+        // Each thread only looks at threads with lower tid, ensuring stable sort order
+        uint rank = 0;
+        if (valid) {
+            for (uint i = 0; i < tid; i++) {
+                if (shared_digits[i] == digit) {
+                    rank++;
+                }
+            }
+        }
+
+        // Step 4: Count total keys per digit in this batch using atomics
+        if (valid) {
+            atomic_fetch_add_explicit(
+                (threadgroup atomic_uint*)&digit_counts[digit],
+                1, memory_order_relaxed);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Step 5: Write keys - each thread knows exactly where to write
+        // Output position = base offset for digit + rank within this batch
+        if (valid) {
+            uint base = local_offsets[digit];
+            uint out_idx = base + rank;
+            keys_out[out_idx] = key;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Step 6: Update local offsets for next batch
+        for (uint d = tid; d < RADIX_SIZE; d += tg_size) {
+            local_offsets[d] += digit_counts[d];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 }
