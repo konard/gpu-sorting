@@ -6,6 +6,7 @@ description = "A proof of concept comparing CPU vs GPU sorting performance on Ap
 license = "Unlicense"
 repository = "https://github.com/konard/gpu-sorting"
 keywords = ["gpu", "sorting", "metal", "apple-silicon", "benchmark"]
+default-run = "gpu-sorting"
 
 [dependencies]
 rand = "0.8"
