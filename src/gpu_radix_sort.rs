@@ -55,7 +55,9 @@ mod metal_impl {
         scan_pipeline: ComputePipelineState,
         scatter_offsets_pipeline: ComputePipelineState,
         scatter_pipeline: ComputePipelineState,
+        scatter_simd_pipeline: ComputePipelineState, // SIMD-optimized scatter
         max_threadgroup_size: usize,
+        use_simd: bool, // Whether to use SIMD-optimized scatter kernel
     }
 
     impl GpuRadixSorter {
@@ -95,6 +97,10 @@ mod metal_impl {
                 .get_function("radix_scatter", None)
                 .map_err(|e| format!("Failed to get radix_scatter: {}", e))?;
 
+            let scatter_simd_fn = library
+                .get_function("radix_scatter_simd", None)
+                .map_err(|e| format!("Failed to get radix_scatter_simd: {}", e))?;
+
             // Create compute pipeline states
             let histogram_pipeline = device
                 .new_compute_pipeline_state_with_function(&histogram_fn)
@@ -116,6 +122,10 @@ mod metal_impl {
                 .new_compute_pipeline_state_with_function(&scatter_fn)
                 .map_err(|e| format!("Failed to create scatter pipeline: {}", e))?;
 
+            let scatter_simd_pipeline = device
+                .new_compute_pipeline_state_with_function(&scatter_simd_fn)
+                .map_err(|e| format!("Failed to create scatter_simd pipeline: {}", e))?;
+
             let max_threadgroup_size =
                 histogram_pipeline.max_total_threads_per_threadgroup() as usize;
 
@@ -127,8 +137,30 @@ mod metal_impl {
                 scan_pipeline,
                 scatter_offsets_pipeline,
                 scatter_pipeline,
+                scatter_simd_pipeline,
                 max_threadgroup_size,
+                use_simd: false, // Default to basic scatter; can be enabled
             })
+        }
+
+        /// Create a new GPU radix sorter with SIMD-optimized scatter kernel.
+        ///
+        /// The SIMD-optimized kernel uses Metal's SIMD group operations for
+        /// faster rank computation within each 32-thread SIMD group.
+        pub fn new_simd() -> Result<Self, String> {
+            let mut sorter = Self::new()?;
+            sorter.use_simd = true;
+            Ok(sorter)
+        }
+
+        /// Enable or disable SIMD-optimized scatter kernel.
+        pub fn set_use_simd(&mut self, use_simd: bool) {
+            self.use_simd = use_simd;
+        }
+
+        /// Check if SIMD-optimized scatter kernel is enabled.
+        pub fn is_simd_enabled(&self) -> bool {
+            self.use_simd
         }
 
         /// Get the GPU device name
@@ -320,21 +352,42 @@ mod metal_impl {
                     let command_buffer = self.command_queue.new_command_buffer();
                     let encoder = command_buffer.new_compute_command_encoder();
 
-                    encoder.set_compute_pipeline_state(&self.scatter_pipeline);
-                    encoder.set_buffer(0, Some(input_buffer), 0);
-                    encoder.set_buffer(1, Some(output_buffer), 0);
-                    encoder.set_buffer(2, Some(&scatter_offsets_buffer), 0);
-                    encoder.set_buffer(3, Some(&array_size_buffer), 0);
-                    encoder.set_buffer(4, Some(&shift_buffer), 0);
+                    // Choose between basic and SIMD-optimized scatter kernel
+                    if self.use_simd {
+                        encoder.set_compute_pipeline_state(&self.scatter_simd_pipeline);
+                        encoder.set_buffer(0, Some(input_buffer), 0);
+                        encoder.set_buffer(1, Some(output_buffer), 0);
+                        encoder.set_buffer(2, Some(&scatter_offsets_buffer), 0);
+                        encoder.set_buffer(3, Some(&array_size_buffer), 0);
+                        encoder.set_buffer(4, Some(&shift_buffer), 0);
 
-                    // Threadgroup memory for scatter kernel:
-                    // Index 0: local_offsets (RADIX_SIZE = 256 uints)
-                    // Index 1: shared_digits (THREADGROUP_SIZE = 256 uints)
-                    // Index 2: digit_counts (RADIX_SIZE = 256 uints)
-                    let threadgroup_mem = (THREADGROUP_SIZE * mem::size_of::<u32>()) as u64;
-                    encoder.set_threadgroup_memory_length(0, histogram_tg_mem); // local_offsets (256)
-                    encoder.set_threadgroup_memory_length(1, threadgroup_mem); // shared_digits (256)
-                    encoder.set_threadgroup_memory_length(2, histogram_tg_mem); // digit_counts (256)
+                        // Threadgroup memory for SIMD scatter kernel:
+                        // - local_offsets: RADIX_SIZE = 256 uints
+                        // - simd_digit_counts: RADIX_SIZE * 8 = 2048 uints (8 SIMD groups)
+                        // - digit_counts: RADIX_SIZE = 256 uints
+                        let num_simd_groups = 8;
+                        let simd_counts_mem =
+                            (RADIX_SIZE * num_simd_groups * mem::size_of::<u32>()) as u64;
+                        encoder.set_threadgroup_memory_length(0, histogram_tg_mem);
+                        encoder.set_threadgroup_memory_length(1, simd_counts_mem);
+                        encoder.set_threadgroup_memory_length(2, histogram_tg_mem);
+                    } else {
+                        encoder.set_compute_pipeline_state(&self.scatter_pipeline);
+                        encoder.set_buffer(0, Some(input_buffer), 0);
+                        encoder.set_buffer(1, Some(output_buffer), 0);
+                        encoder.set_buffer(2, Some(&scatter_offsets_buffer), 0);
+                        encoder.set_buffer(3, Some(&array_size_buffer), 0);
+                        encoder.set_buffer(4, Some(&shift_buffer), 0);
+
+                        // Threadgroup memory for basic scatter kernel:
+                        // - local_offsets: RADIX_SIZE = 256 uints
+                        // - shared_digits: THREADGROUP_SIZE = 256 uints
+                        // - digit_counts: RADIX_SIZE = 256 uints
+                        let threadgroup_mem = (THREADGROUP_SIZE * mem::size_of::<u32>()) as u64;
+                        encoder.set_threadgroup_memory_length(0, histogram_tg_mem);
+                        encoder.set_threadgroup_memory_length(1, threadgroup_mem);
+                        encoder.set_threadgroup_memory_length(2, histogram_tg_mem);
+                    }
 
                     let grid_size = MTLSize::new((num_threadgroups * tg_size) as u64, 1, 1);
                     let threadgroup_size = MTLSize::new(tg_size as u64, 1, 1);
@@ -381,6 +434,10 @@ pub struct GpuRadixSorter;
 #[cfg(not(target_os = "macos"))]
 impl GpuRadixSorter {
     pub fn new() -> Result<Self, String> {
+        Err("GPU radix sort via Metal is only available on macOS.".to_string())
+    }
+
+    pub fn new_simd() -> Result<Self, String> {
         Err("GPU radix sort via Metal is only available on macOS.".to_string())
     }
 
