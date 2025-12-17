@@ -323,7 +323,10 @@ kernel void radix_scatter_simd(
             }
 
             // Store this SIMD group's count for this digit
-            if (simd_lane == 0) {
+            // Each thread that is the FIRST occurrence of its digit in the SIMD group
+            // writes the count. This ensures all digits present get their counts written.
+            // Bug fix: Previously only simd_lane == 0 wrote, leaving other digits' counts as 0.
+            if (simd_rank == 0) {
                 simd_digit_counts[simd_group_id * RADIX_SIZE + digit] = simd_count;
             }
         }
