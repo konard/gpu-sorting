@@ -1,0 +1,133 @@
+Issue #15: Fix bug
+Issue URL: https://github.com/konard/gpu-sorting/issues/15
+
+=== TERMINAL OUTPUT FROM ISSUE ===
+
+konard@MacBook-Pro-Konstantin gpu-sorting % cargo run --release -- 2684354
+   Compiling gpu-sorting v0.1.0 (/Users/konard/Code/Archive/konard/gpu-sorting)
+    Finished `release` profile [optimized] target(s) in 1.32s
+     Running `target/release/gpu-sorting 2684354`
+GPU Sorting Proof of Concept
+=============================
+
+Array size: 2684354 elements (10 MB)
+Note: Bitonic sort will use 4194304 elements (rounded to power of 2)
+
+Generating random data...
+
+--- CPU Sorting (std::sort unstable / pdqsort) ---
+CPU pdqsort time: 28.757 ms
+CPU pdqsort verified: OK
+
+--- CPU Sorting (Radix Sort) ---
+CPU radix sort time: 10.007 ms
+CPU radix sort verified: OK
+
+--- CPU Sorting (Parallel pdqsort with rayon) ---
+CPU parallel sort time: 9.027 ms
+CPU parallel sort verified: OK
+
+--- CPU Sorting (Parallel Radix Sort) ---
+CPU parallel radix sort time: 7.644 ms
+CPU parallel radix sort verified: OK
+
+--- CPU Sorting (Bitonic Sort) ---
+CPU bitonic sort time: 858.921 ms
+CPU bitonic sort verified: OK
+
+--- GPU Sorting (Metal Bitonic Sort) ---
+Using GPU: Apple M3 Pro
+Using GPU: Device: Apple M3 Pro
+GPU bitonic sort time: 57.120 ms
+GPU bitonic sort verified: OK
+
+--- GPU Sorting (Metal Radix Sort - DeviceRadixSort) ---
+Failed to initialize GPU radix sorter: Failed to compile radix sort shader: program_source:308:18: warning: unused variable 'my_contribution' [-Wunused-variable]
+            uint my_contribution = match ? 1u : 0u;
+                 ^
+program_source:346:47: error: use of undeclared identifier 'simd_rank'; did you mean 'simd_lane'?
+            rank = prefix_from_earlier_simd + simd_rank;
+                                              ^~~~~~~~~
+                                              simd_lane
+program_source:257:10: note: 'simd_lane' declared here
+    uint simd_lane [[thread_index_in_simdgroup]],
+         ^
+program_source:350:13: error: use of undeclared identifier 'valid'
+        if (valid) {
+            ^
+program_source:352:57: error: use of undeclared identifier 'digit'
+                (threadgroup atomic_uint*)&digit_counts[digit],
+                                                        ^
+program_source:358:13: error: use of undeclared identifier 'valid'
+        if (valid) {
+            ^
+program_source:359:39: error: use of undeclared identifier 'digit'
+            uint base = local_offsets[digit];
+                                      ^
+program_source:360:35: error: use of undeclared identifier 'rank'
+            uint out_idx = base + rank;
+                                  ^
+program_source:361:33: error: use of undeclared identifier 'key'
+            keys_out[out_idx] = key;
+                                ^
+program_source:371:1: error: extraneous closing brace ('}')
+}
+^
+
+
+--- GPU Sorting (Metal Radix Sort - SIMD Optimized) ---
+Failed to initialize GPU radix sorter (SIMD): Failed to compile radix sort shader: program_source:308:18: warning: unused variable 'my_contribution' [-Wunused-variable]
+            uint my_contribution = match ? 1u : 0u;
+                 ^
+program_source:346:47: error: use of undeclared identifier 'simd_rank'; did you mean 'simd_lane'?
+            rank = prefix_from_earlier_simd + simd_rank;
+                                              ^~~~~~~~~
+                                              simd_lane
+program_source:257:10: note: 'simd_lane' declared here
+    uint simd_lane [[thread_index_in_simdgroup]],
+         ^
+program_source:350:13: error: use of undeclared identifier 'valid'
+        if (valid) {
+            ^
+program_source:352:57: error: use of undeclared identifier 'digit'
+                (threadgroup atomic_uint*)&digit_counts[digit],
+                                                        ^
+program_source:358:13: error: use of undeclared identifier 'valid'
+        if (valid) {
+            ^
+program_source:359:39: error: use of undeclared identifier 'digit'
+            uint base = local_offsets[digit];
+                                      ^
+program_source:360:35: error: use of undeclared identifier 'rank'
+            uint out_idx = base + rank;
+                                  ^
+program_source:361:33: error: use of undeclared identifier 'key'
+            keys_out[out_idx] = key;
+                                ^
+program_source:371:1: error: extraneous closing brace ('}')
+}
+^
+
+
+--- Performance Comparison ---
+
+[Fair Algorithm Comparisons]
+GPU Bitonic vs CPU Bitonic: GPU is 15.04x faster
+
+[Cross-Algorithm Comparisons]
+GPU Bitonic vs CPU pdqsort: CPU is 1.99x faster
+
+[CPU Algorithm Comparisons]
+CPU Radix vs CPU pdqsort: Radix is 2.87x faster
+CPU Parallel vs CPU Single: Parallel is 3.19x faster
+
+[GPU Algorithm Comparisons]
+konard@MacBook-Pro-Konstantin gpu-sorting %
+
+=== ADDITIONAL CONTEXT ===
+
+Environment: Apple M3 Pro, macOS
+Array size tested: 2684354 elements (~10 MB)
+
+The issue shows Metal shader compilation errors in the `radix_scatter_simd` kernel function.
+This prevents both GPU radix sort implementations from working.

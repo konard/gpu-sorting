@@ -300,18 +300,13 @@ kernel void radix_scatter_simd(
         // have the same digit, plus prefix from earlier SIMD groups
         uint rank = 0;
         uint simd_count = 0;
+        uint simd_rank = 0;
 
         if (valid) {
-            // Use SIMD prefix sum: each thread contributes 1 if it has our digit
-            // simd_prefix_exclusive_sum gives count of matching threads before us
-            bool match = true;  // We always match our own digit
-            uint my_contribution = match ? 1u : 0u;
-
             // Get count of threads with same digit before this thread in SIMD group
             // We need to compare against all threads in the SIMD group
             // Use simd_shuffle to broadcast digits and count matches
 
-            uint simd_rank = 0;
             for (uint lane = 0; lane < simd_lane; lane++) {
                 uint other_digit = simd_shuffle(digit, lane);
                 if (other_digit == digit) {
@@ -320,7 +315,6 @@ kernel void radix_scatter_simd(
             }
 
             // Count total in this SIMD group with same digit
-            simd_count = 0;
             for (uint lane = 0; lane < simd_size; lane++) {
                 uint other_digit = simd_shuffle(digit, lane);
                 if (other_digit == digit) {
@@ -337,6 +331,7 @@ kernel void radix_scatter_simd(
         // Wait for all SIMD groups to write their counts
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
+        if (valid) {
             // Compute prefix sum across SIMD groups for this digit
             uint prefix_from_earlier_simd = 0;
             for (uint sg = 0; sg < simd_group_id; sg++) {
