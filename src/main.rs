@@ -6,15 +6,19 @@
 //! **GPU Algorithms:**
 //! - **Bitonic Sort**: O(n log²n) - comparison-based, requires power-of-2 sizes
 //! - **Radix Sort**: O(n) - linear time using DeviceRadixSort algorithm
+//! - **Radix Sort (SIMD)**: O(n) - SIMD-optimized scatter for faster performance
 //!
 //! **CPU Algorithms:**
 //! - **pdqsort**: O(n log n) - Rust's standard library unstable sort
+//! - **Parallel pdqsort**: O(n log n) - Multi-threaded using rayon
 //! - **Radix Sort**: O(n) - for fair comparison with GPU radix sort
+//! - **Parallel Radix Sort**: O(n) - Multi-threaded for fair parallel comparison
 //! - **Bitonic Sort**: O(n log²n) - for fair comparison with GPU bitonic sort
 //!
 //! The benchmark generates reports in Links Notation format for analysis.
 
 mod cpu_bitonic_sort;
+mod cpu_parallel_sort;
 mod cpu_radix_sort;
 mod cpu_sort;
 mod gpu_radix_sort;
@@ -96,6 +100,38 @@ fn main() {
         "CPU radix sort failed!"
     );
     println!("CPU radix sort verified: OK");
+
+    // ========== CPU Parallel Sort (rayon) ==========
+    println!("\n--- CPU Sorting (Parallel pdqsort with rayon) ---");
+    let mut cpu_parallel_data = data.clone();
+    let cpu_parallel_start = Instant::now();
+    cpu_parallel_sort::parallel_sort(&mut cpu_parallel_data);
+    let cpu_parallel_duration = cpu_parallel_start.elapsed();
+    println!(
+        "CPU parallel sort time: {:.3} ms",
+        cpu_parallel_duration.as_secs_f64() * 1000.0
+    );
+    assert!(
+        cpu_parallel_sort::is_sorted(&cpu_parallel_data),
+        "CPU parallel sort failed!"
+    );
+    println!("CPU parallel sort verified: OK");
+
+    // ========== CPU Parallel Radix Sort ==========
+    println!("\n--- CPU Sorting (Parallel Radix Sort) ---");
+    let mut cpu_parallel_radix_data = data.clone();
+    let cpu_parallel_radix_start = Instant::now();
+    cpu_parallel_sort::parallel_radix_sort(&mut cpu_parallel_radix_data);
+    let cpu_parallel_radix_duration = cpu_parallel_radix_start.elapsed();
+    println!(
+        "CPU parallel radix sort time: {:.3} ms",
+        cpu_parallel_radix_duration.as_secs_f64() * 1000.0
+    );
+    assert!(
+        cpu_parallel_sort::is_sorted(&cpu_parallel_radix_data),
+        "CPU parallel radix sort failed!"
+    );
+    println!("CPU parallel radix sort verified: OK");
 
     // ========== CPU Bitonic Sort ==========
     println!("\n--- CPU Sorting (Bitonic Sort) ---");
@@ -192,25 +228,105 @@ fn main() {
         }
     };
 
+    // ========== GPU Radix Sorting (SIMD-Optimized) ==========
+    println!("\n--- GPU Sorting (Metal Radix Sort - SIMD Optimized) ---");
+    let gpu_radix_simd_duration = match gpu_radix_sort::GpuRadixSorter::new_simd() {
+        Ok(sorter) => {
+            println!("Using GPU: {} (SIMD scatter)", sorter.device_name());
+            let mut gpu_data = data.clone();
+            let gpu_start = Instant::now();
+            match sorter.sort(&mut gpu_data) {
+                Ok(()) => {
+                    let gpu_duration = gpu_start.elapsed();
+                    println!(
+                        "GPU radix sort (SIMD) time: {:.3} ms",
+                        gpu_duration.as_secs_f64() * 1000.0
+                    );
+
+                    if cpu_sort::is_sorted(&gpu_data) {
+                        println!("GPU radix sort (SIMD) verified: OK");
+
+                        // Compare results with CPU
+                        if gpu_data == cpu_data {
+                            println!("Results match CPU sort: OK");
+                        } else {
+                            println!("WARNING: Results differ from CPU sort!");
+                        }
+                    } else {
+                        println!("ERROR: GPU radix sort (SIMD) failed verification!");
+                    }
+                    Some(gpu_duration)
+                }
+                Err(e) => {
+                    println!("GPU radix sort (SIMD) error: {}", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            println!("Failed to initialize GPU radix sorter (SIMD): {}", e);
+            None
+        }
+    };
+
     // ========== Performance Comparison ==========
     println!("\n--- Performance Comparison ---");
 
     let cpu_ms = cpu_duration.as_secs_f64() * 1000.0;
     let cpu_radix_ms = cpu_radix_duration.as_secs_f64() * 1000.0;
+    let cpu_parallel_ms = cpu_parallel_duration.as_secs_f64() * 1000.0;
+    let cpu_parallel_radix_ms = cpu_parallel_radix_duration.as_secs_f64() * 1000.0;
     let cpu_bitonic_ms = cpu_bitonic_duration.as_secs_f64() * 1000.0;
 
     // Fair comparisons first
     println!("\n[Fair Algorithm Comparisons]");
 
-    // GPU Radix vs CPU Radix
+    // GPU Radix vs CPU Radix (single-threaded)
     if let Some(gpu_radix_dur) = gpu_radix_duration {
         let gpu_radix_ms = gpu_radix_dur.as_secs_f64() * 1000.0;
         let speedup = cpu_radix_ms / gpu_radix_ms;
         if speedup > 1.0 {
-            println!("GPU Radix vs CPU Radix: GPU is {:.2}x faster", speedup);
+            println!(
+                "GPU Radix vs CPU Radix (single): GPU is {:.2}x faster",
+                speedup
+            );
         } else {
             println!(
-                "GPU Radix vs CPU Radix: CPU is {:.2}x faster",
+                "GPU Radix vs CPU Radix (single): CPU is {:.2}x faster",
+                1.0 / speedup
+            );
+        }
+    }
+
+    // GPU Radix vs CPU Parallel Radix
+    if let Some(gpu_radix_dur) = gpu_radix_duration {
+        let gpu_radix_ms = gpu_radix_dur.as_secs_f64() * 1000.0;
+        let speedup = cpu_parallel_radix_ms / gpu_radix_ms;
+        if speedup > 1.0 {
+            println!(
+                "GPU Radix vs CPU Radix (parallel): GPU is {:.2}x faster",
+                speedup
+            );
+        } else {
+            println!(
+                "GPU Radix vs CPU Radix (parallel): CPU is {:.2}x faster",
+                1.0 / speedup
+            );
+        }
+    }
+
+    // GPU Radix SIMD vs CPU Parallel Radix
+    if let Some(gpu_radix_simd_dur) = gpu_radix_simd_duration {
+        let gpu_radix_simd_ms = gpu_radix_simd_dur.as_secs_f64() * 1000.0;
+        let speedup = cpu_parallel_radix_ms / gpu_radix_simd_ms;
+        if speedup > 1.0 {
+            println!(
+                "GPU Radix (SIMD) vs CPU Radix (parallel): GPU is {:.2}x faster",
+                speedup
+            );
+        } else {
+            println!(
+                "GPU Radix (SIMD) vs CPU Radix (parallel): CPU is {:.2}x faster",
                 1.0 / speedup
             );
         }
@@ -259,6 +375,23 @@ fn main() {
         }
     }
 
+    // GPU Radix vs CPU Parallel
+    if let Some(radix_dur) = gpu_radix_duration {
+        let radix_ms = radix_dur.as_secs_f64() * 1000.0;
+        let speedup = cpu_parallel_ms / radix_ms;
+        if speedup > 1.0 {
+            println!(
+                "GPU Radix vs CPU Parallel pdqsort: GPU is {:.2}x faster",
+                speedup
+            );
+        } else {
+            println!(
+                "GPU Radix vs CPU Parallel pdqsort: CPU is {:.2}x faster",
+                1.0 / speedup
+            );
+        }
+    }
+
     // CPU algorithm comparisons
     println!("\n[CPU Algorithm Comparisons]");
     let pdq_vs_radix = cpu_ms / cpu_radix_ms;
@@ -274,15 +407,45 @@ fn main() {
         );
     }
 
+    // Parallel speedup
+    let parallel_speedup = cpu_ms / cpu_parallel_ms;
+    if parallel_speedup > 1.0 {
+        println!(
+            "CPU Parallel vs CPU Single: Parallel is {:.2}x faster",
+            parallel_speedup
+        );
+    } else {
+        println!(
+            "CPU Parallel vs CPU Single: Single is {:.2}x faster",
+            1.0 / parallel_speedup
+        );
+    }
+
     // GPU algorithm comparisons
+    println!("\n[GPU Algorithm Comparisons]");
     if let (Some(bitonic_dur), Some(radix_dur)) = (gpu_bitonic_duration, gpu_radix_duration) {
-        println!("\n[GPU Algorithm Comparisons]");
         let speedup = bitonic_dur.as_secs_f64() / radix_dur.as_secs_f64();
         if speedup > 1.0 {
             println!("GPU Radix vs GPU Bitonic: Radix is {:.2}x faster", speedup);
         } else {
             println!(
                 "GPU Radix vs GPU Bitonic: Bitonic is {:.2}x faster",
+                1.0 / speedup
+            );
+        }
+    }
+
+    // SIMD vs basic scatter comparison
+    if let (Some(radix_dur), Some(simd_dur)) = (gpu_radix_duration, gpu_radix_simd_duration) {
+        let speedup = radix_dur.as_secs_f64() / simd_dur.as_secs_f64();
+        if speedup > 1.0 {
+            println!(
+                "GPU Radix (SIMD) vs GPU Radix (basic): SIMD is {:.2}x faster",
+                speedup
+            );
+        } else {
+            println!(
+                "GPU Radix (SIMD) vs GPU Radix (basic): Basic is {:.2}x faster",
                 1.0 / speedup
             );
         }
