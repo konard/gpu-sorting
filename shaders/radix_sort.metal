@@ -332,10 +332,10 @@ kernel void radix_scatter_simd(
             if (simd_lane == 0) {
                 simd_digit_counts[simd_group_id * RADIX_SIZE + digit] = simd_count;
             }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
+        }
 
-            // Wait for all SIMD groups to write their counts
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Wait for all SIMD groups to write their counts
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
             // Compute prefix sum across SIMD groups for this digit
             uint prefix_from_earlier_simd = 0;

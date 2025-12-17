@@ -153,16 +153,6 @@ mod metal_impl {
             Ok(sorter)
         }
 
-        /// Enable or disable SIMD-optimized scatter kernel.
-        pub fn set_use_simd(&mut self, use_simd: bool) {
-            self.use_simd = use_simd;
-        }
-
-        /// Check if SIMD-optimized scatter kernel is enabled.
-        pub fn is_simd_enabled(&self) -> bool {
-            self.use_simd
-        }
-
         /// Get the GPU device name
         pub fn device_name(&self) -> String {
             self.device.name().to_string()
