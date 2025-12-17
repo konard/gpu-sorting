@@ -1,0 +1,100 @@
+Issue #13: We need to fix all warnings and errors
+Issue URL: https://github.com/konard/gpu-sorting/issues/13
+
+=== TERMINAL OUTPUT FROM ISSUE ===
+
+konard@MacBook-Pro-Konstantin gpu-sorting % cargo run --release -- 268435456
+warning: methods `set_use_simd` and `is_simd_enabled` are never used
+   --> src/gpu_radix_sort.rs:157:16
+    |
+ 63 |     impl GpuRadixSorter {
+    |     ------------------- methods in this implementation
+...
+157 |         pub fn set_use_simd(&mut self, use_simd: bool) {
+    |                ^^^^^^^^^^^^^
+...
+162 |         pub fn is_simd_enabled(&self) -> bool {
+    |                ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `gpu-sorting` (bin "gpu-sorting") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 0.10s
+     Running `target/release/gpu-sorting 268435456`
+GPU Sorting Proof of Concept
+=============================
+
+Array size: 268435456 elements (1073 MB)
+
+Generating random data...
+
+--- CPU Sorting (std::sort unstable / pdqsort) ---
+CPU pdqsort time: 3508.612 ms
+CPU pdqsort verified: OK
+
+--- CPU Sorting (Radix Sort) ---
+CPU radix sort time: 2230.859 ms
+CPU radix sort verified: OK
+
+--- CPU Sorting (Parallel pdqsort with rayon) ---
+CPU parallel sort time: 1038.968 ms
+CPU parallel sort verified: OK
+
+--- CPU Sorting (Parallel Radix Sort) ---
+CPU parallel radix sort time: 1409.104 ms
+CPU parallel radix sort verified: OK
+
+--- CPU Sorting (Bitonic Sort) ---
+CPU bitonic sort time: 81508.971 ms
+CPU bitonic sort verified: OK
+
+--- GPU Sorting (Metal Bitonic Sort) ---
+Using GPU: Apple M3 Pro
+Using GPU: Device: Apple M3 Pro
+GPU bitonic sort time: 4037.819 ms
+GPU bitonic sort verified: OK
+
+--- GPU Sorting (Metal Radix Sort - DeviceRadixSort) ---
+Using GPU: Apple M3 Pro
+GPU radix sort time: 1866.260 ms
+GPU radix sort verified: OK
+Results match CPU sort: OK
+
+--- GPU Sorting (Metal Radix Sort - SIMD Optimized) ---
+Using GPU: Apple M3 Pro (SIMD scatter)
+GPU radix sort (SIMD) time: 1576.804 ms
+ERROR: GPU radix sort (SIMD) failed verification!
+
+--- Performance Comparison ---
+
+[Fair Algorithm Comparisons]
+GPU Radix vs CPU Radix (single): GPU is 1.20x faster
+GPU Radix vs CPU Radix (parallel): CPU is 1.32x faster
+GPU Radix (SIMD) vs CPU Radix (parallel): CPU is 1.12x faster
+GPU Bitonic vs CPU Bitonic: GPU is 20.19x faster
+
+[Cross-Algorithm Comparisons]
+GPU Bitonic vs CPU pdqsort: CPU is 1.15x faster
+GPU Radix vs CPU pdqsort: GPU is 1.88x faster
+GPU Radix vs CPU Parallel pdqsort: CPU is 1.80x faster
+
+[CPU Algorithm Comparisons]
+CPU Radix vs CPU pdqsort: Radix is 1.57x faster
+CPU Parallel vs CPU Single: Parallel is 3.38x faster
+
+[GPU Algorithm Comparisons]
+GPU Radix vs GPU Bitonic: Radix is 2.16x faster
+GPU Radix (SIMD) vs GPU Radix (basic): SIMD is 1.18x faster
+
+=== ISSUE SUMMARY ===
+
+Two main issues identified:
+
+1. WARNING: Dead code - methods `set_use_simd` and `is_simd_enabled` are never used
+   Location: src/gpu_radix_sort.rs:157 and :162
+   These are public methods defined in the GpuRadixSorter implementation but never called
+
+2. ERROR: GPU radix sort (SIMD) failed verification!
+   The SIMD-optimized scatter kernel produces incorrect sorting results
+   The data is not properly sorted after the SIMD scatter operation
+   Non-SIMD version works correctly, only SIMD version fails
