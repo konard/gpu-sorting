@@ -298,37 +298,37 @@ kernel void radix_scatter_simd(
         // Step 2: Compute rank using SIMD operations
         // For each thread, compute how many threads before it (in this SIMD group)
         // have the same digit, plus prefix from earlier SIMD groups
+        //
+        // IMPORTANT: simd_shuffle must be called by ALL threads in the SIMD group
+        // for uniform control flow. The shuffle operations are placed outside the
+        // "if (valid)" block to ensure all 32 threads participate. Invalid threads
+        // have digit = RADIX_SIZE (256) which won't match any valid digit (0-255).
         uint rank = 0;
         uint simd_count = 0;
         uint simd_rank = 0;
 
-        if (valid) {
-            // Get count of threads with same digit before this thread in SIMD group
-            // We need to compare against all threads in the SIMD group
-            // Use simd_shuffle to broadcast digits and count matches
-
-            for (uint lane = 0; lane < simd_lane; lane++) {
-                uint other_digit = simd_shuffle(digit, lane);
-                if (other_digit == digit) {
-                    simd_rank++;
-                }
+        // All threads must execute simd_shuffle together (SIMD uniform control flow)
+        // Count threads with same digit that come before this thread in SIMD group
+        for (uint lane = 0; lane < simd_lane; lane++) {
+            uint other_digit = simd_shuffle(digit, lane);
+            if (valid && other_digit == digit) {
+                simd_rank++;
             }
+        }
 
-            // Count total in this SIMD group with same digit
-            for (uint lane = 0; lane < simd_size; lane++) {
-                uint other_digit = simd_shuffle(digit, lane);
-                if (other_digit == digit) {
-                    simd_count++;
-                }
+        // Count total threads in this SIMD group with same digit
+        for (uint lane = 0; lane < simd_size; lane++) {
+            uint other_digit = simd_shuffle(digit, lane);
+            if (valid && other_digit == digit) {
+                simd_count++;
             }
+        }
 
-            // Store this SIMD group's count for this digit
-            // Each thread that is the FIRST occurrence of its digit in the SIMD group
-            // writes the count. This ensures all digits present get their counts written.
-            // Bug fix: Previously only simd_lane == 0 wrote, leaving other digits' counts as 0.
-            if (simd_rank == 0) {
-                simd_digit_counts[simd_group_id * RADIX_SIZE + digit] = simd_count;
-            }
+        // Store this SIMD group's count for this digit
+        // Each thread that is the FIRST occurrence of its digit in the SIMD group
+        // writes the count. This ensures all digits present get their counts written.
+        if (valid && simd_rank == 0) {
+            simd_digit_counts[simd_group_id * RADIX_SIZE + digit] = simd_count;
         }
 
         // Wait for all SIMD groups to write their counts
