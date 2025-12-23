@@ -299,26 +299,28 @@ kernel void radix_scatter_simd(
         // For each thread, compute how many threads before it (in this SIMD group)
         // have the same digit, plus prefix from earlier SIMD groups
         //
-        // IMPORTANT: simd_shuffle must be called by ALL threads in the SIMD group
-        // for uniform control flow. The shuffle operations are placed outside the
-        // "if (valid)" block to ensure all 32 threads participate. Invalid threads
-        // have digit = RADIX_SIZE (256) which won't match any valid digit (0-255).
+        // CRITICAL: simd_shuffle requires UNIFORM control flow - ALL threads in the
+        // SIMD group must call simd_shuffle with the SAME lane parameter at the SAME time.
+        // This means we CANNOT use variable loop bounds like "lane < simd_lane".
+        //
+        // Instead, we loop over ALL lanes (0 to simd_size-1) uniformly, and use
+        // conditional logic INSIDE the loop to only count relevant lanes.
+        // Invalid threads have digit = RADIX_SIZE (256) which won't match valid digits (0-255).
         uint rank = 0;
         uint simd_count = 0;
         uint simd_rank = 0;
 
         // All threads must execute simd_shuffle together (SIMD uniform control flow)
-        // Count threads with same digit that come before this thread in SIMD group
-        for (uint lane = 0; lane < simd_lane; lane++) {
-            uint other_digit = simd_shuffle(digit, lane);
-            if (valid && other_digit == digit) {
-                simd_rank++;
-            }
-        }
-
-        // Count total threads in this SIMD group with same digit
+        // Loop over ALL lanes uniformly, but only count matches for:
+        // - simd_rank: lanes BEFORE this thread's lane (lane < simd_lane)
+        // - simd_count: ALL lanes in the SIMD group
         for (uint lane = 0; lane < simd_size; lane++) {
             uint other_digit = simd_shuffle(digit, lane);
+            // Count for rank: only lanes before this thread
+            if (valid && lane < simd_lane && other_digit == digit) {
+                simd_rank++;
+            }
+            // Count for total: all lanes
             if (valid && other_digit == digit) {
                 simd_count++;
             }
