@@ -14,6 +14,7 @@
 //!
 //! - `parallel_sort`: Uses rayon's parallel pdqsort (fastest comparison-based)
 //! - `parallel_radix_sort`: Uses parallel radix sort (for fair O(n) comparison)
+//! - `parallel_bitonic_sort`: Uses parallel bitonic sort (for fair O(n log²n) comparison)
 
 use rayon::prelude::*;
 
@@ -107,6 +108,86 @@ pub fn parallel_radix_sort(data: &mut [u32]) {
     });
 }
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// Parallel bitonic sort using rayon for parallelization.
+///
+/// This provides a parallel O(n log²n) bitonic sort for fair comparison with
+/// GPU bitonic sort. Uses parallel compare-and-swap operations at each step.
+///
+/// The algorithm:
+/// 1. Build bitonic sequences of increasing size
+/// 2. For each step size k, run compare-and-swap in parallel
+/// 3. Each comparison is independent, so perfectly parallelizable
+///
+/// # Arguments
+///
+/// * `data` - Mutable slice to sort in place (must be power of 2 length)
+pub fn parallel_bitonic_sort(data: &mut [u32]) {
+    let n = data.len();
+    if n <= 1 {
+        return;
+    }
+
+    // Bitonic sort requires power of 2 length
+    assert!(
+        n.is_power_of_two(),
+        "Bitonic sort requires power of 2 length, got {}",
+        n
+    );
+
+    // For small arrays, use sequential sort
+    if n < 1024 {
+        crate::cpu_bitonic_sort::sort(data);
+        return;
+    }
+
+    // Convert to atomic array for safe parallel access
+    // SAFETY: AtomicU32 has the same memory layout as u32
+    let atomic_data: &[AtomicU32] =
+        unsafe { std::slice::from_raw_parts(data.as_ptr() as *const AtomicU32, n) };
+
+    // Build up sorted sequences of increasing size
+    // k is the size of the bitonic sequence being sorted
+    let mut k = 2;
+    while k <= n {
+        // j is the distance between elements being compared
+        let mut j = k / 2;
+        while j > 0 {
+            let current_k = k;
+            let current_j = j;
+
+            // Process all pairs in parallel using atomics for synchronization
+            (0..n).into_par_iter().for_each(|i| {
+                let ixj = i ^ current_j;
+                // Only process if ixj > i (avoid double processing)
+                if ixj > i && ixj < n {
+                    let ascending = (i & current_k) == 0;
+
+                    // Use relaxed ordering since bitonic sort guarantees
+                    // no conflicting accesses within the same step
+                    let val_i = atomic_data[i].load(Ordering::Relaxed);
+                    let val_ixj = atomic_data[ixj].load(Ordering::Relaxed);
+
+                    let should_swap = if ascending {
+                        val_i > val_ixj
+                    } else {
+                        val_i < val_ixj
+                    };
+
+                    if should_swap {
+                        atomic_data[i].store(val_ixj, Ordering::Relaxed);
+                        atomic_data[ixj].store(val_i, Ordering::Relaxed);
+                    }
+                }
+            });
+
+            j /= 2;
+        }
+        k *= 2;
+    }
+}
+
 /// Check if a slice is sorted in ascending order.
 pub fn is_sorted(data: &[u32]) -> bool {
     data.windows(2).all(|w| w[0] <= w[1])
@@ -188,5 +269,46 @@ mod tests {
         expected.sort_unstable();
         parallel_sort(&mut data);
         assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn test_parallel_bitonic_sort_small() {
+        let mut data = vec![4, 2, 1, 3, 8, 6, 5, 7];
+        parallel_bitonic_sort(&mut data);
+        assert!(is_sorted(&data));
+        assert_eq!(data, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_parallel_bitonic_sort_random() {
+        let mut rng = rand::thread_rng();
+        let size = 1 << 14; // 16384 - power of 2
+        let mut data: Vec<u32> = (0..size).map(|_| rng.gen()).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+
+        parallel_bitonic_sort(&mut data);
+        assert!(is_sorted(&data));
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn test_parallel_bitonic_sort_large() {
+        let mut rng = rand::thread_rng();
+        let size = 1 << 16; // 65536 - power of 2
+        let mut data: Vec<u32> = (0..size).map(|_| rng.gen()).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+
+        parallel_bitonic_sort(&mut data);
+        assert!(is_sorted(&data));
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "Bitonic sort requires power of 2 length")]
+    fn test_parallel_bitonic_sort_non_power_of_2_panics() {
+        let mut data = vec![1u32, 2, 3];
+        parallel_bitonic_sort(&mut data);
     }
 }
