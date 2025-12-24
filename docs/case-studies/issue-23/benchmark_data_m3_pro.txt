@@ -1,0 +1,232 @@
+# Benchmark Data from Issue #23
+# Device: Apple M3 Pro
+# Date: Original benchmark from issue report
+# Source: https://github.com/konard/gpu-sorting/issues/23
+
+================================================================================
+SINGLE SIZE BENCHMARK (Array size: 1048576 elements, 4 MB)
+================================================================================
+
+--- CPU Sorting (std::sort unstable / pdqsort) ---
+CPU pdqsort time: 14.813 ms
+CPU pdqsort verified: OK
+
+--- CPU Sorting (Radix Sort) ---
+CPU radix sort time: 5.657 ms
+CPU radix sort verified: OK
+
+--- CPU Sorting (Parallel pdqsort with rayon) ---
+CPU parallel sort time: 4.011 ms
+CPU parallel sort verified: OK
+
+--- CPU Sorting (Parallel Radix Sort) ---
+CPU parallel radix sort time: 3.564 ms
+CPU parallel radix sort verified: OK
+
+--- CPU Sorting (Bitonic Sort) ---
+CPU bitonic sort time: 185.804 ms
+CPU bitonic sort verified: OK
+
+--- CPU Sorting (Parallel Bitonic Sort) ---
+CPU parallel bitonic sort time: 55.053 ms
+CPU parallel bitonic sort verified: OK
+
+--- GPU Sorting (Metal Bitonic Sort) ---
+Using GPU: Apple M3 Pro
+GPU bitonic sort time: 21.625 ms
+GPU bitonic sort verified: OK
+
+--- GPU Sorting (Metal Radix Sort - DeviceRadixSort) ---
+Using GPU: Apple M3 Pro
+GPU radix sort time: 10.184 ms
+GPU radix sort verified: OK
+Results match CPU sort: OK
+
+--- GPU Sorting (Metal Radix Sort - SIMD Optimized) ---
+Using GPU: Apple M3 Pro (SIMD scatter)
+GPU radix sort (SIMD) time: 12.389 ms
+GPU radix sort (SIMD) verified: OK
+Results match CPU sort: OK
+
+================================================================================
+FAIR ALGORITHM COMPARISONS
+================================================================================
+
+GPU Radix vs CPU Radix (single): CPU is 1.80x faster
+GPU Radix vs CPU Radix (parallel): CPU is 2.86x faster
+GPU Radix (SIMD) vs CPU Radix (parallel): CPU is 3.48x faster
+GPU Bitonic vs CPU Bitonic: GPU is 8.59x faster
+GPU Bitonic vs CPU Bitonic (parallel): GPU is 2.55x faster
+
+================================================================================
+CROSS-ALGORITHM COMPARISONS
+================================================================================
+
+GPU Bitonic vs CPU pdqsort: CPU is 1.46x faster
+GPU Radix vs CPU pdqsort: GPU is 1.45x faster
+GPU Radix vs CPU Parallel pdqsort: CPU is 2.54x faster
+
+================================================================================
+CPU ALGORITHM COMPARISONS
+================================================================================
+
+CPU Radix vs CPU pdqsort: Radix is 2.62x faster
+CPU Parallel vs CPU Single: Parallel is 3.69x faster
+CPU Parallel Bitonic vs CPU Bitonic: Parallel is 3.38x faster
+
+================================================================================
+GPU ALGORITHM COMPARISONS
+================================================================================
+
+GPU Radix vs GPU Bitonic: Radix is 2.12x faster
+GPU Radix (SIMD) vs GPU Radix (basic): Basic is 1.22x faster
+
+================================================================================
+VERIFICATION TABLE (From Comprehensive Benchmark)
+================================================================================
+
+   Algorithm |          CPU           |      CPU Parallel      |       GPU
+-------------+------------------------+------------------------+----------------
+  Radix Sort |           OK           |           OK           |       OK
+Bitonic Sort |           OK           |           OK           |       OK
+     pdqsort |           OK           |           OK           |       N/A
+
+================================================================================
+PERFORMANCE TABLE (Comprehensive Benchmark)
+================================================================================
+(Rows: algorithms, Columns: implementation methods)
+(Using CPU single-threaded as baseline, showing speedup factor)
+
+   Algorithm |         Size |        CPU (ms) |    CPU Parallel |             GPU
+-------------+--------------+-----------------+-----------------+----------------
+  Radix Sort |         1024 |           0.004 |    3.63x slower |  650.05x slower
+Bitonic Sort |         1024 |           0.084 |   33.13x slower |    6.19x slower
+     pdqsort |         1024 |           0.008 |    1.89x slower |             N/A
+-------------+--------------+-----------------+-----------------+----------------
+  Radix Sort |         4096 |           0.015 |    4.14x slower |  215.50x slower
+Bitonic Sort |         4096 |           0.373 |   14.10x slower |    2.60x slower
+     pdqsort |         4096 |           0.029 |    2.00x slower |             N/A
+-------------+--------------+-----------------+-----------------+----------------
+  Radix Sort |        16384 |           0.063 |    2.52x slower |   62.55x slower
+Bitonic Sort |        16384 |           1.772 |    4.48x slower |    1.37x slower
+     pdqsort |        16384 |           0.118 |    1.64x slower |             N/A
+-------------+--------------+-----------------+-----------------+----------------
+  Radix Sort |        65536 |           0.236 |    1.11x faster |   14.28x slower
+Bitonic Sort |        65536 |           8.024 |    1.43x slower |    1.90x faster
+     pdqsort |        65536 |           0.495 |    1.37x faster |             N/A
+-------------+--------------+-----------------+-----------------+----------------
+  Radix Sort |       262144 |           0.955 |    1.32x faster |    5.39x slower
+Bitonic Sort |       262144 |          37.987 |    1.72x faster |    3.48x faster
+     pdqsort |       262144 |           2.137 |    2.34x faster |             N/A
+-------------+--------------+-----------------+-----------------+----------------
+  Radix Sort |      1048576 |           4.530 |    1.43x faster |    4.09x slower
+Bitonic Sort |      1048576 |         184.033 |    3.41x faster |    6.79x faster
+     pdqsort |      1048576 |           9.862 |    2.85x faster |             N/A
+-------------+--------------+-----------------+-----------------+----------------
+  Radix Sort |      4194304 |          19.239 |    1.12x faster |    1.74x slower
+Bitonic Sort |      4194304 |         840.529 |    4.05x faster |   15.72x faster
+     pdqsort |      4194304 |          42.476 |    3.06x faster |             N/A
+-------------+--------------+-----------------+-----------------+----------------
+  Radix Sort |     16777216 |          81.797 |    1.36x faster |    1.28x slower
+Bitonic Sort |     16777216 |        3934.726 |    4.64x faster |   23.79x faster
+     pdqsort |     16777216 |         183.834 |    3.24x faster |             N/A
+
+================================================================================
+PERFORMANCE RANKING (Best First) - For each array size
+================================================================================
+
+Size: 1024 elements
+Rank |                 Algorithm |        Platform |    Time (ms)
+-----+---------------------------+-----------------+-------------
+   1 |                Radix Sort |             CPU |        0.004
+   2 |                   pdqsort |             CPU |        0.008
+   3 |                   pdqsort |    CPU Parallel |        0.015
+   4 |                Radix Sort |    CPU Parallel |        0.015
+   5 |              Bitonic Sort |             CPU |        0.084
+   6 |              Bitonic Sort |             GPU |        0.519
+   7 |                Radix Sort |             GPU |        2.709
+   8 |              Bitonic Sort |    CPU Parallel |        2.776
+
+Size: 4096 elements
+Rank |                 Algorithm |        Platform |    Time (ms)
+-----+---------------------------+-----------------+-------------
+   1 |                Radix Sort |             CPU |        0.015
+   2 |                   pdqsort |             CPU |        0.029
+   3 |                   pdqsort |    CPU Parallel |        0.058
+   4 |                Radix Sort |    CPU Parallel |        0.063
+   5 |              Bitonic Sort |             CPU |        0.373
+   6 |              Bitonic Sort |             GPU |        0.969
+   7 |                Radix Sort |             GPU |        3.269
+   8 |              Bitonic Sort |    CPU Parallel |        5.263
+
+Size: 16384 elements
+Rank |                 Algorithm |        Platform |    Time (ms)
+-----+---------------------------+-----------------+-------------
+   1 |                Radix Sort |             CPU |        0.063
+   2 |                   pdqsort |             CPU |        0.118
+   3 |                Radix Sort |    CPU Parallel |        0.159
+   4 |                   pdqsort |    CPU Parallel |        0.194
+   5 |              Bitonic Sort |             CPU |        1.772
+   6 |              Bitonic Sort |             GPU |        2.431
+   7 |                Radix Sort |             GPU |        3.943
+   8 |              Bitonic Sort |    CPU Parallel |        7.931
+
+Size: 65536 elements
+Rank |                 Algorithm |        Platform |    Time (ms)
+-----+---------------------------+-----------------+-------------
+   1 |                Radix Sort |    CPU Parallel |        0.213
+   2 |                Radix Sort |             CPU |        0.236
+   3 |                   pdqsort |    CPU Parallel |        0.361
+   4 |                   pdqsort |             CPU |        0.495
+   5 |                Radix Sort |             GPU |        3.373
+   6 |              Bitonic Sort |             GPU |        4.228
+   7 |              Bitonic Sort |             CPU |        8.024
+   8 |              Bitonic Sort |    CPU Parallel |       11.461
+
+Size: 262144 elements
+Rank |                 Algorithm |        Platform |    Time (ms)
+-----+---------------------------+-----------------+-------------
+   1 |                Radix Sort |    CPU Parallel |        0.723
+   2 |                   pdqsort |    CPU Parallel |        0.915
+   3 |                Radix Sort |             CPU |        0.955
+   4 |                   pdqsort |             CPU |        2.137
+   5 |                Radix Sort |             GPU |        5.152
+   6 |              Bitonic Sort |             GPU |       10.927
+   7 |              Bitonic Sort |    CPU Parallel |       22.072
+   8 |              Bitonic Sort |             CPU |       37.987
+
+Size: 1048576 elements
+Rank |                 Algorithm |        Platform |    Time (ms)
+-----+---------------------------+-----------------+-------------
+   1 |                Radix Sort |    CPU Parallel |        3.161
+   2 |                   pdqsort |    CPU Parallel |        3.462
+   3 |                Radix Sort |             CPU |        4.530
+   4 |                   pdqsort |             CPU |        9.862
+   5 |                Radix Sort |             GPU |       18.515
+   6 |              Bitonic Sort |             GPU |       27.100
+   7 |              Bitonic Sort |    CPU Parallel |       54.040
+   8 |              Bitonic Sort |             CPU |      184.033
+
+Size: 4194304 elements
+Rank |                 Algorithm |        Platform |    Time (ms)
+-----+---------------------------+-----------------+-------------
+   1 |                   pdqsort |    CPU Parallel |       13.884
+   2 |                Radix Sort |    CPU Parallel |       17.219
+   3 |                Radix Sort |             CPU |       19.239
+   4 |                Radix Sort |             GPU |       33.559
+   5 |                   pdqsort |             CPU |       42.476
+   6 |              Bitonic Sort |             GPU |       53.477
+   7 |              Bitonic Sort |    CPU Parallel |      207.331
+   8 |              Bitonic Sort |             CPU |      840.529
+
+Size: 16777216 elements
+Rank |                 Algorithm |        Platform |    Time (ms)
+-----+---------------------------+-----------------+-------------
+   1 |                   pdqsort |    CPU Parallel |       56.685
+   2 |                Radix Sort |    CPU Parallel |       60.064
+   3 |                Radix Sort |             CPU |       81.797
+   4 |                Radix Sort |             GPU |      105.004
+   5 |              Bitonic Sort |             GPU |      165.408
+   6 |                   pdqsort |             CPU |      183.834
+   7 |              Bitonic Sort |    CPU Parallel |      848.882
+   8 |              Bitonic Sort |             CPU |     3934.726
