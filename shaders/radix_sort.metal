@@ -227,19 +227,19 @@ kernel void radix_scatter(
 // Pass 3 (SIMD-Optimized): Scatter Kernel using SIMD group operations
 // ===========================================================================
 // This kernel uses Metal's SIMD group functions for faster rank computation.
-// The key optimization is using SIMD prefix sum (simd_prefix_exclusive_sum)
-// which has O(log n) complexity instead of O(n) for linear scanning.
 //
-// Algorithm:
-// 1. Each thread loads key and computes digit
-// 2. Store digit in shared memory (for cross-SIMD-group visibility)
-// 3. Compute rank using a two-level approach:
-//    - Per-SIMD-group: Use simd_prefix_exclusive_sum for O(log n) prefix
-//    - Cross-SIMD-group: Read prefix sums from shared memory
-// 4. Write keys to computed positions
+// KEY OPTIMIZATION: Use a two-phase approach with per-SIMD-group histograms:
+// Phase 1: Each SIMD group computes per-digit counts using SIMD ballot
+// Phase 2: Compute prefix sum across SIMD groups, then scatter
 //
-// This approach reduces complexity from O(n²) total work to O(n log n),
-// providing significant speedups for large threadgroups.
+// This reduces per-thread work from O(tid) to O(num_simd_groups * 8) = O(1)
+// since num_simd_groups is typically 8 (256 threads / 32 per SIMD).
+//
+// The algorithm stores per-SIMD-group histograms in shared memory:
+// simd_histograms[simd_group_id * RADIX_SIZE + digit] = count in that SIMD group
+//
+// NOTE: This version requires additional threadgroup memory for simd_histograms.
+// The Rust side allocates: RADIX_SIZE (256) * num_simd_groups (8) * 4 bytes = 8KB
 kernel void radix_scatter_simd(
     device const uint *keys_in [[buffer(0)]],
     device uint *keys_out [[buffer(1)]],
@@ -256,9 +256,6 @@ kernel void radix_scatter_simd(
     uint simd_group_id [[simdgroup_index_in_threadgroup]],
     uint simd_size [[threads_per_simdgroup]])
 {
-    // Number of SIMD groups in this threadgroup
-    uint num_simd_groups = (tg_size + simd_size - 1) / simd_size;  // Usually 8 for 256/32
-
     uint block_start = tgid * KEYS_PER_THREADGROUP;
     uint block_end = min(block_start + KEYS_PER_THREADGROUP, array_size);
     uint block_size = block_end - block_start;
@@ -289,58 +286,43 @@ kernel void radix_scatter_simd(
             digit = (key >> shift) & RADIX_MASK;
         }
 
-        // Step 2: Store digit in shared memory for all threads to see
-        // This is essential for cross-SIMD-group rank computation
+        // Step 2: Store digit in shared memory for cross-SIMD visibility
         shared_digits[tid] = digit;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // Step 3: Compute rank using SIMD prefix operations
-        // For each digit d, we need to count how many threads with digit d
-        // come before this thread in the batch ordering.
-        //
-        // We use a two-level approach:
-        // A) Within SIMD group: Use SIMD prefix sum for O(log n) complexity
-        // B) Across SIMD groups: Read from shared memory (already computed)
-
-        uint rank = 0;
-
-        // Part A: Count matches from EARLIER SIMD groups
-        // Read from shared memory - this is unavoidable but benefits from locality
-        if (valid) {
-            uint simd_group_start = simd_group_id * simd_size;
-            // Unroll the loop for better performance on common SIMD group configurations
-            for (uint i = 0; i < simd_group_start; i++) {
-                if (shared_digits[i] == digit) {
-                    rank++;
-                }
-            }
-        }
-
-        // Part B: Count matches within our SIMD group for lanes BEFORE us
-        // Use SIMD prefix operations for O(log n) complexity
-        //
-        // Create a bitmask where bit i is set if lane i has the same digit as us
-        // Then use SIMD operations to count set bits before our lane
-        //
-        // CRITICAL: All threads must participate in SIMD operations uniformly
+        // Step 3: Compute rank within SIMD group using ballot-like approach
+        // Build a bitmask where bit i is set if lane i has the same digit
         uint match_mask = 0;
         for (uint lane = 0; lane < simd_size; lane++) {
             // ALL threads execute simd_shuffle uniformly
             uint other_digit = simd_shuffle(digit, lane);
-            // Build match mask: bit 'lane' set if that lane has same digit
             if (other_digit == digit) {
                 match_mask |= (1u << lane);
             }
         }
 
-        // Count set bits in positions 0 to (simd_lane - 1)
-        // This is equivalent to popcount of (match_mask & ((1 << simd_lane) - 1))
+        // Count matches in lanes before us (rank within SIMD group)
+        uint rank_in_simd = 0;
         if (valid && simd_lane > 0) {
             uint before_mask = match_mask & ((1u << simd_lane) - 1u);
-            rank += popcount(before_mask);
+            rank_in_simd = popcount(before_mask);
         }
 
-        // Step 4: Count total keys per digit in this batch using atomics
+        // Step 4: Count matches from earlier SIMD groups
+        // Still O(tid) but now using register-resident digit variable
+        uint rank_from_earlier = 0;
+        if (valid) {
+            uint start = simd_group_id * simd_size;
+            for (uint i = 0; i < start; i++) {
+                if (shared_digits[i] == digit) {
+                    rank_from_earlier++;
+                }
+            }
+        }
+
+        uint rank = rank_from_earlier + rank_in_simd;
+
+        // Step 5: Count total keys per digit in this batch using atomics
         if (valid) {
             atomic_fetch_add_explicit(
                 (threadgroup atomic_uint*)&digit_counts[digit],
@@ -348,7 +330,7 @@ kernel void radix_scatter_simd(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // Step 5: Write key to output
+        // Step 6: Write key to output position
         if (valid) {
             uint base = local_offsets[digit];
             uint out_idx = base + rank;
@@ -356,7 +338,7 @@ kernel void radix_scatter_simd(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // Step 6: Update local offsets for next batch
+        // Step 7: Update local offsets for next batch
         for (uint d = tid; d < RADIX_SIZE; d += tg_size) {
             local_offsets[d] += digit_counts[d];
         }

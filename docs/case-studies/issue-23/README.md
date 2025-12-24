@@ -10,9 +10,9 @@ The following high-priority optimizations have been **implemented**:
 
 | Optimization | Status | Description |
 |-------------|--------|-------------|
-| **Command Buffer Batching (Radix)** | ✅ Implemented | Reduced from 20 GPU submissions to 4 (one per pass) |
+| **Ultra-Batched Command Buffer (Radix)** | ✅ Implemented | Reduced from 20 GPU submissions to **just 1** (all 4 passes in single buffer) |
 | **Command Buffer Batching (Bitonic)** | ✅ Implemented | Batched all substages per stage into single command buffer |
-| **SIMD Scatter Fix** | ✅ Implemented | Used popcount + bitmask for O(log n) rank computation |
+| **SIMD Scatter Optimization** | ✅ Implemented | Used popcount + bitmask for O(log n) rank computation within SIMD groups |
 | **Extended Benchmark to 64M** | ✅ Implemented | Added 64M element test case for larger GPU advantages |
 
 ### Key Findings
@@ -195,37 +195,39 @@ The CPU implementation benefits from:
 
 ## Proposed Optimizations
 
-### Optimization 1: Batch Command Buffers (High Impact) ✅ IMPLEMENTED
+### Optimization 1: Ultra-Batched Command Buffer (High Impact) ✅ IMPLEMENTED
 
-Instead of 20 separate GPU submissions, batch all kernels into a single command buffer per pass (4 total) or even a single command buffer for all passes.
+Instead of 20 separate GPU submissions, batch ALL kernels from ALL passes into a SINGLE command buffer.
 
 **Status**: ✅ Implemented in `src/gpu_radix_sort.rs` and `src/gpu_sort.rs`
 
 ```rust
-// IMPLEMENTED: All 5 kernels batched into single command buffer per pass
+// IMPLEMENTED: All 20 kernels (4 passes × 5 kernels) in ONE command buffer
+let command_buffer = self.command_queue.new_command_buffer();
+
 for pass in 0..4u32 {
-    let command_buffer = self.command_queue.new_command_buffer();
+    // Determine input/output buffers for ping-pong
+    let (input_buffer, output_buffer) = if pass % 2 == 0 {
+        (&buffer_a, &buffer_b)
+    } else {
+        (&buffer_b, &buffer_a)
+    };
 
     // Kernel 1: Histogram
     let encoder = command_buffer.new_compute_command_encoder();
     // ... dispatch histogram
     encoder.end_encoding();
 
-    // Kernel 2: Reduce
-    let encoder = command_buffer.new_compute_command_encoder();
-    // ... dispatch reduce
-    encoder.end_encoding();
-
-    // Kernel 3: Scan
-    // ... (all 5 kernels in same command buffer)
-
-    // Submit all 5 kernels at once
-    command_buffer.commit();
-    command_buffer.wait_until_completed();
+    // Kernels 2-5: Reduce, Scan, Scatter Offsets, Scatter
+    // ... (all in same command buffer, Metal handles synchronization)
 }
+
+// Submit ALL 20 kernels at once
+command_buffer.commit();
+command_buffer.wait_until_completed();
 ```
 
-**Result**: Reduced GPU submissions from 20 to 4 (5x fewer submissions).
+**Result**: Reduced GPU submissions from 20 to **just 1** (20x fewer submissions). Metal command buffers execute encoders in order with proper memory synchronization, allowing us to pipeline all passes without CPU intervention.
 
 ### Optimization 2: Parallel Rank Computation with SIMD (High Impact) ✅ IMPLEMENTED
 

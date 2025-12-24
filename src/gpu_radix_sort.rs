@@ -173,11 +173,12 @@ mod metal_impl {
         /// 4. Scatter offsets: Compute per-threadgroup offsets
         /// 5. Scatter: Reorder keys
         ///
-        /// ## Optimization: Command Buffer Batching
+        /// ## Optimization: Ultra-Batched Command Buffer
         ///
-        /// This implementation batches all kernel dispatches within a single radix pass
-        /// into ONE command buffer, reducing 20 GPU submissions to just 4 (one per pass).
-        /// This dramatically reduces CPU-GPU synchronization overhead.
+        /// This implementation batches ALL 20 kernel dispatches (4 passes × 5 kernels)
+        /// into a SINGLE command buffer, reducing GPU submissions from 20 to just 1.
+        /// Metal command buffers execute encoders in order with proper memory synchronization,
+        /// allowing us to pipeline all passes without CPU intervention.
         pub fn sort(&self, data: &mut [u32]) -> Result<(), String> {
             let n = data.len();
 
@@ -257,19 +258,32 @@ mod metal_impl {
             // Determine actual threadgroup size to use
             let tg_size = THREADGROUP_SIZE.min(self.max_threadgroup_size);
 
+            // =====================================================
+            // ULTRA-BATCHED: All 4 passes in a SINGLE command buffer
+            // =====================================================
+            // This reduces 4 separate GPU submissions to just 1,
+            // dramatically reducing CPU-GPU synchronization overhead.
+            //
+            // Metal command buffers execute encoders in order, and
+            // memory operations between encoders are properly synchronized.
+            let command_buffer = self.command_queue.new_command_buffer();
+
             // Process 4 passes (8 bits each for 32-bit integers)
-            let mut input_buffer = &buffer_a;
-            let mut output_buffer = &buffer_b;
+            // Pass 0: buffer_a -> buffer_b (shift 0)
+            // Pass 1: buffer_b -> buffer_a (shift 8)
+            // Pass 2: buffer_a -> buffer_b (shift 16)
+            // Pass 3: buffer_b -> buffer_a (shift 24)
+            // After 4 passes, result is in buffer_a
 
             for pass in 0..4u32 {
                 let shift_buffer = &shift_buffers[pass as usize];
 
-                // =====================================================
-                // BATCHED COMMAND BUFFER: All 5 kernels in ONE buffer
-                // =====================================================
-                // This reduces 5 separate GPU submissions per pass to just 1,
-                // cutting total submissions from 20 to 4.
-                let command_buffer = self.command_queue.new_command_buffer();
+                // Determine input/output buffers for this pass
+                let (input_buffer, output_buffer) = if pass % 2 == 0 {
+                    (&buffer_a, &buffer_b)
+                } else {
+                    (&buffer_b, &buffer_a)
+                };
 
                 // ====== Kernel 1: Histogram ======
                 {
@@ -367,17 +381,15 @@ mod metal_impl {
                     encoder.dispatch_threads(grid_size, threadgroup_size);
                     encoder.end_encoding();
                 }
-
-                // Submit all 5 kernels at once and wait
-                command_buffer.commit();
-                command_buffer.wait_until_completed();
-
-                // Swap buffers for next pass
-                std::mem::swap(&mut input_buffer, &mut output_buffer);
             }
 
-            // After 4 passes, result is in input_buffer (due to final swap)
-            let result_ptr = input_buffer.contents() as *const u32;
+            // Submit all 20 kernels (4 passes × 5 kernels) at once and wait
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
+
+            // After 4 passes (even number), result is in buffer_a
+            // Pass 0: a -> b, Pass 1: b -> a, Pass 2: a -> b, Pass 3: b -> a
+            let result_ptr = buffer_a.contents() as *const u32;
             unsafe {
                 std::ptr::copy_nonoverlapping(result_ptr, data.as_mut_ptr(), n);
             }
