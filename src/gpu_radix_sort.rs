@@ -351,15 +351,13 @@ mod metal_impl {
                         encoder.set_buffer(3, Some(&array_size_buffer), 0);
                         encoder.set_buffer(4, Some(&shift_buffer), 0);
 
-                        // Threadgroup memory for SIMD scatter kernel:
+                        // Threadgroup memory for SIMD scatter kernel (same as basic kernel):
                         // - local_offsets: RADIX_SIZE = 256 uints
-                        // - simd_digit_counts: RADIX_SIZE * 8 = 2048 uints (8 SIMD groups)
+                        // - shared_digits: THREADGROUP_SIZE = 256 uints
                         // - digit_counts: RADIX_SIZE = 256 uints
-                        let num_simd_groups = 8;
-                        let simd_counts_mem =
-                            (RADIX_SIZE * num_simd_groups * mem::size_of::<u32>()) as u64;
+                        let threadgroup_mem = (THREADGROUP_SIZE * mem::size_of::<u32>()) as u64;
                         encoder.set_threadgroup_memory_length(0, histogram_tg_mem);
-                        encoder.set_threadgroup_memory_length(1, simd_counts_mem);
+                        encoder.set_threadgroup_memory_length(1, threadgroup_mem);
                         encoder.set_threadgroup_memory_length(2, histogram_tg_mem);
                     } else {
                         encoder.set_compute_pipeline_state(&self.scatter_pipeline);

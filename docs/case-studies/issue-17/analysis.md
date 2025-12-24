@@ -6,7 +6,8 @@ This case study documents a critical bug in the SIMD-optimized GPU radix sort sc
 
 1. **Original Bug (PR #18 fix)**: Only lane 0 wrote digit counts, leaving counts for other digits as zero
 2. **Intermediate Fix (PR #19)**: Moved `simd_shuffle` outside `if (valid)` block - still failed
-3. **Root Cause (this fix)**: **Variable loop bounds** (`lane < simd_lane`) caused non-uniform execution - different threads executed different numbers of shuffle operations
+3. **Uniform Loop Bounds Fix (PR #20 v1)**: Used uniform loop bounds `lane < simd_size` - still failed
+4. **Root Cause (this fix)**: **Hybrid approach** - Use shared memory for cross-SIMD-group visibility, SIMD shuffle only for within-group rank computation
 
 ## Timeline of Events
 
@@ -29,142 +30,120 @@ This case study documents a critical bug in the SIMD-optimized GPU radix sort sc
 
 ## Root Cause Analysis
 
-### The True Bug: Non-Uniform Loop Bounds for simd_shuffle
+### Previous Approach: Pure SIMD with simd_digit_counts
 
-The previous fix (PR #19) correctly moved simd_shuffle outside the `if (valid)` block. However, **the loop bounds were still non-uniform across threads**:
+The previous approach tried to avoid using shared memory for digits by:
+1. Computing `simd_rank` and `simd_count` using only `simd_shuffle`
+2. Writing counts to a per-SIMD-group array (`simd_digit_counts`)
+3. Summing counts from earlier SIMD groups to compute prefix
 
-#### Problematic Code (after PR #19, still failing):
+This approach had multiple subtle issues:
+- **Non-uniform loop bounds** initially (`lane < simd_lane`)
+- Even with uniform bounds, the cross-SIMD-group communication via `simd_digit_counts` was error-prone
+- Race conditions in how counts were aggregated
+
+### The True Fix: Hybrid Approach
+
+The correct approach uses the same pattern as the working basic kernel but adds SIMD optimization:
+
+1. **Store digits in shared memory** (like basic kernel) - essential for cross-SIMD-group visibility
+2. **Read from shared memory** for counts from earlier SIMD groups
+3. **Use simd_shuffle** only for within-SIMD-group rank computation
 
 ```metal
-// This loop has VARIABLE bounds - each thread loops a different number of times!
-for (uint lane = 0; lane < simd_lane; lane++) {  // Thread 0: 0 iterations, Thread 31: 31 iterations
-    uint other_digit = simd_shuffle(digit, lane);
-    if (valid && other_digit == digit) {
-        simd_rank++;
+// Step 2: Store digit in shared memory for all threads to see
+shared_digits[tid] = digit;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+
+// Step 3: Compute rank - hybrid approach
+uint rank = 0;
+
+// Part A: Count from EARLIER SIMD groups (read from shared memory)
+if (valid) {
+    uint simd_group_start = simd_group_id * simd_size;
+    for (uint i = 0; i < simd_group_start; i++) {
+        if (shared_digits[i] == digit) {
+            rank++;
+        }
     }
 }
-```
 
-The issue is subtle but critical:
-- **Thread 0 (lane 0)**: Loops 0 times, never calls simd_shuffle
-- **Thread 1 (lane 1)**: Loops 1 time, calls simd_shuffle(digit, 0)
-- **Thread 31 (lane 31)**: Loops 31 times, calls simd_shuffle(digit, 0) through simd_shuffle(digit, 30)
-
-When Thread 1 calls `simd_shuffle(digit, 0)`, Thread 0 is **NOT** calling simd_shuffle at that moment - it has already exited the loop. This violates SIMD uniform control flow.
-
-### Why This Causes Undefined Behavior
-
-According to [Apple Developer Forums](https://developer.apple.com/forums/thread/703337):
-
-> "For correct behaviour all threads in SIMD group should execute these instructions. For Apple GPUs SIMD size is fixed and equal to 32. So in case of M1 all 32 threads must execute the same code path to produce correct result."
-
-The [Apple G13 GPU Architecture Reference](https://dougallj.github.io/applegpu/docs.html) confirms:
-
-> "SIMD shuffle instructions can read from inactive threads in some cases" - but behavior is undefined.
-
-**Key insight**: SIMD uniform control flow requires not just that all threads call simd_shuffle, but that they call it **with the same lane parameter at the same time**. Variable loop bounds violate this.
-
-### Detailed Problem Analysis
-
-Consider what happens during execution:
-
-| Iteration | Thread 0 | Thread 1 | Thread 31 | Problem |
-|-----------|----------|----------|-----------|---------|
-| lane=0    | EXIT     | simd_shuffle(digit, 0) | simd_shuffle(digit, 0) | Thread 0 not calling shuffle! |
-| lane=1    | EXIT     | EXIT     | simd_shuffle(digit, 1) | Threads 0-1 not calling shuffle! |
-| lane=30   | EXIT     | EXIT     | simd_shuffle(digit, 30) | Only Thread 31 calling shuffle! |
-
-## The Correct Fix
-
-### Uniform Loop Bounds with Conditional Logic Inside
-
-The fix ensures ALL threads iterate over ALL lanes (0 to simd_size-1), but use conditional logic INSIDE the loop to count only relevant lanes:
-
-```metal
-// CORRECT: Uniform loop bounds - all threads execute same iterations
-for (uint lane = 0; lane < simd_size; lane++) {  // All 32 threads loop 32 times
+// Part B: Count within our SIMD group (use simd_shuffle)
+// CRITICAL: simd_shuffle must be called by ALL threads uniformly
+for (uint lane = 0; lane < simd_size; lane++) {
     uint other_digit = simd_shuffle(digit, lane);
-    // Count for rank: only lanes BEFORE this thread
     if (valid && lane < simd_lane && other_digit == digit) {
-        simd_rank++;
-    }
-    // Count for total: all lanes
-    if (valid && other_digit == digit) {
-        simd_count++;
+        rank++;
     }
 }
 ```
 
-### Key Changes
+### Why This Works
 
-1. **Uniform loop bounds**: `lane < simd_size` ensures ALL 32 threads execute the loop 32 times
-2. **Conditional inside loop**: `lane < simd_lane` check moved INSIDE the loop body
-3. **Single loop for both counts**: Combined simd_rank and simd_count into one loop for efficiency
-4. **Invalid threads still excluded**: `valid &&` prefix ensures only valid threads count
+1. **Shared memory provides reliable cross-SIMD-group communication** - The basic kernel uses this approach and works correctly
+2. **SIMD shuffle provides fast within-group rank computation** - All threads call simd_shuffle with uniform loop bounds
+3. **No complex per-SIMD-group aggregation** - Removes the error-prone `simd_digit_counts` array
 
-### Execution After Fix
+### Key Changes from Previous Fix
 
-| Iteration | Thread 0 | Thread 1 | Thread 31 | Status |
-|-----------|----------|----------|-----------|--------|
-| lane=0    | simd_shuffle(digit, 0) | simd_shuffle(digit, 0) | simd_shuffle(digit, 0) | ✓ All threads synchronized |
-| lane=1    | simd_shuffle(digit, 1) | simd_shuffle(digit, 1) | simd_shuffle(digit, 1) | ✓ All threads synchronized |
-| ...       | ...      | ...      | ...       | ✓ |
-| lane=31   | simd_shuffle(digit, 31) | simd_shuffle(digit, 31) | simd_shuffle(digit, 31) | ✓ All threads synchronized |
+| Aspect | Previous (Failed) | Current (Fixed) |
+|--------|-------------------|-----------------|
+| Cross-SIMD communication | `simd_digit_counts` array | `shared_digits` (like basic) |
+| Within-SIMD rank | simd_shuffle loop | simd_shuffle loop (same) |
+| Threadgroup memory | 3 arrays including `simd_digit_counts` | 3 arrays including `shared_digits` |
+| Complexity | High (aggregation logic) | Lower (matches basic kernel pattern) |
 
 ## Impact Assessment
 
 ### Before Fix
-- **SIMD GPU Radix Sort**: Produces incorrect results due to non-uniform simd_shuffle execution
+- **SIMD GPU Radix Sort**: Produces incorrect results
 - **Verification**: FAILS
 
 ### After Fix
-- **SIMD GPU Radix Sort**: Correct results with uniform SIMD operations
-- **Performance**: Slight overhead from extra loop iterations (32 vs average 16), but still faster than basic kernel
+- **SIMD GPU Radix Sort**: Correct results matching basic kernel
+- **Performance**: Slight speedup over basic kernel due to SIMD within-group optimization
 - **Verification**: Should PASS
 
 ## Testing Strategy
 
 1. **Unit Tests**: Run `cargo test` to verify all existing tests pass
 2. **Integration Tests**: Run `cargo run --release -- 2684354` to replicate the original issue
-3. **Edge Cases**: Test with array sizes that leave partial SIMD groups (e.g., 2684354 % 32 ≠ 0)
+3. **Edge Cases**: Test with array sizes that leave partial SIMD groups
 4. **Multiple Array Sizes**: Test with 1K, 1M, 10M elements
 5. **Comparison**: Verify SIMD results match basic kernel results exactly
 
 ## Lessons Learned
 
-### 1. SIMD Uniform Control Flow Requires Uniform LOOP BOUNDS
-Moving simd_shuffle outside conditional blocks is necessary but not sufficient. Loop bounds must also be uniform across all threads in the SIMD group.
+### 1. When SIMD Optimization Fails, Fallback to Known-Working Pattern
+The basic scatter kernel worked correctly. The SIMD kernel should have built upon it incrementally rather than reimplementing the cross-SIMD-group communication.
 
-### 2. Variable Loop Bounds Are a Subtle Source of Divergence
-`for (uint lane = 0; lane < simd_lane; lane++)` looks uniform because all threads enter the loop, but each thread has a different termination condition.
+### 2. Shared Memory Is More Reliable Than Complex SIMD Aggregation
+The `simd_digit_counts` approach tried to avoid shared memory reads but introduced subtle bugs. Shared memory is the standard way to communicate across SIMD groups.
 
-### 3. Move Conditions INSIDE Loops, Not Loop Bounds
-Instead of varying the loop bounds, use uniform bounds and conditional logic inside:
-- BAD: `for (lane = 0; lane < simd_lane; lane++) { shuffle(lane); }`
-- GOOD: `for (lane = 0; lane < simd_size; lane++) { if (lane < simd_lane) count++; shuffle(lane); }`
+### 3. SIMD Optimization Should Be Additive, Not Replacement
+The fixed approach uses SIMD shuffle as an *optimization* for the within-group loop, while keeping shared memory for cross-group communication. This is safer than replacing the entire algorithm.
 
-### 4. GPU Debugging Requires Deep Architecture Understanding
-This bug persisted through multiple fix attempts because it required understanding not just WHAT simd_shuffle does, but HOW it must be called (uniformly by all threads).
+### 4. simd_shuffle Requires Uniform Control Flow
+All threads in a SIMD group must call simd_shuffle with the same parameters at the same time. This means:
+- Loop bounds must be uniform (`lane < simd_size`, not `lane < simd_lane`)
+- The simd_shuffle call must be outside any thread-divergent conditionals
+- Conditional logic for counting should be INSIDE the loop, after the shuffle
 
 ## References
 
 - [Issue #17](https://github.com/konard/gpu-sorting/issues/17) - The bug report
-- [PR #12](https://github.com/konard/gpu-sorting/pull/12) - Original SIMD implementation
-- [PR #18](https://github.com/konard/gpu-sorting/pull/18) - Previous fix attempt (write condition)
-- [PR #19](https://github.com/konard/gpu-sorting/pull/19) - Previous fix attempt (moved shuffle outside if)
 - [Apple Developer Forums - simdgroup issues](https://developer.apple.com/forums/thread/703337) - SIMD uniform control flow requirement
 - [Apple G13 GPU Architecture Reference](https://dougallj.github.io/applegpu/docs.html) - Apple Silicon GPU internals
 - [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf) - Apple's Metal documentation
-- [GPUSorting by b0nes164](https://github.com/b0nes164/GPUSorting) - Reference implementations
-- [Linebender GPU Sorting Wiki](https://linebender.org/wiki/gpu/sorting/) - GPU sorting techniques
+- [GPUSorting by b0nes164](https://github.com/b0nes164/GPUSorting) - Reference GPU sorting implementations
+- [ShoYamanishi/AppleNumericalComputing](https://github.com/ShoYamanishi/AppleNumericalComputing) - Metal radix sort reference
 
 ## Conclusion
 
-The root cause was **non-uniform loop bounds** in the simd_shuffle loop. The loop `for (lane = 0; lane < simd_lane; lane++)` caused each thread to execute a different number of shuffle operations, violating SIMD uniform control flow requirements.
+The root cause was the **complex SIMD-only aggregation approach** for cross-SIMD-group rank computation. The `simd_digit_counts` mechanism was fragile and prone to subtle bugs.
 
-The fix changes the loop to use uniform bounds (`lane < simd_size`) so all 32 threads execute the same number of shuffle operations with the same lane parameters. The conditional logic for counting ranks is moved inside the loop body.
+The fix adopts a **hybrid approach** that:
+1. Uses **shared memory** for cross-SIMD-group communication (proven to work in basic kernel)
+2. Uses **simd_shuffle** only for within-SIMD-group rank optimization
 
-This bug illustrates the importance of:
-1. **Understanding that loop bounds must be uniform** for SIMD operations
-2. **Moving varying conditions inside loops** rather than using them as loop bounds
-3. **Careful analysis of all sources of control flow divergence**, not just explicit conditionals
+This maintains most of the performance benefit while ensuring correctness by building on the known-working pattern from the basic scatter kernel.
