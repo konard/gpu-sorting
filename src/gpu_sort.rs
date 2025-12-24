@@ -420,6 +420,11 @@ kernel void bitonic_merge_local(
         /// - For block sizes larger than LOCAL_SORT_SIZE, performs global merge passes
         /// - Uses a hybrid approach: global dispatches for large distances, local for small
         /// - Commands are batched into single command buffers to reduce synchronization
+        ///
+        /// ## Optimization: Command Buffer Batching
+        ///
+        /// Multiple merge operations within each stage are batched into a single command buffer,
+        /// dramatically reducing CPU-GPU synchronization overhead.
         pub fn sort(&self, data: &mut [u32]) -> Result<(), String> {
             let n = data.len();
 
@@ -493,17 +498,36 @@ kernel void bitonic_merge_local(
             }
 
             // ============================================
-            // Phase 2: Global Merge
+            // Phase 2: Global Merge (with Command Buffer Batching)
             // ============================================
             // Now we have sorted blocks of local_sort_size. We need to merge them.
             // For block sizes > local_sort_size, we need global memory operations.
+            //
+            // OPTIMIZATION: We batch all global merge dispatches for a single stage
+            // into ONE command buffer, reducing submissions significantly.
 
             let num_stages = (n as f64).log2() as u32;
             let local_stages = (local_sort_size as f64).log2() as u32;
 
+            let num_threads = n / 2;
+            let thread_group_size = self
+                .global_merge_pipeline
+                .max_total_threads_per_threadgroup()
+                .min(num_threads as u64);
+
             // Process stages where block_size > local_sort_size
             for stage in local_stages..num_stages {
                 let block_size = 2u32 << stage;
+
+                // Create ONE command buffer for all substages of this stage
+                let command_buffer = self.command_queue.new_command_buffer();
+
+                // Create block_size buffer once per stage
+                let block_size_buffer = self.device.new_buffer_with_data(
+                    &block_size as *const u32 as *const _,
+                    mem::size_of::<u32>() as u64,
+                    MTLResourceOptions::StorageModeShared,
+                );
 
                 for substage in 0..=stage {
                     let comparison_distance = block_size >> substage;
@@ -513,16 +537,10 @@ kernel void bitonic_merge_local(
                     // boundary and need global operations.
                     if (comparison_distance as usize) < local_sort_size {
                         // Use local merge kernel for all remaining substages of this stage
-                        let command_buffer = self.command_queue.new_command_buffer();
                         let encoder = command_buffer.new_compute_command_encoder();
                         encoder.set_compute_pipeline_state(&self.local_merge_pipeline);
 
-                        // Create parameter buffers for this dispatch
-                        let block_size_buffer = self.device.new_buffer_with_data(
-                            &block_size as *const u32 as *const _,
-                            mem::size_of::<u32>() as u64,
-                            MTLResourceOptions::StorageModeShared,
-                        );
+                        // Create parameter buffer for comparison distance
                         let max_local_dist_buffer = self.device.new_buffer_with_data(
                             &comparison_distance as *const u32 as *const _,
                             mem::size_of::<u32>() as u64,
@@ -537,28 +555,19 @@ kernel void bitonic_merge_local(
 
                         let num_threadgroups = (n + local_sort_size - 1) / local_sort_size;
                         let grid_size = MTLSize::new((num_threadgroups * tg_size) as u64, 1, 1);
-                        let threadgroup_size = MTLSize::new(tg_size as u64, 1, 1);
+                        let threadgroup_size_local = MTLSize::new(tg_size as u64, 1, 1);
 
-                        encoder.dispatch_threads(grid_size, threadgroup_size);
+                        encoder.dispatch_threads(grid_size, threadgroup_size_local);
                         encoder.end_encoding();
-
-                        command_buffer.commit();
-                        command_buffer.wait_until_completed();
 
                         // Local merge handles all remaining substages, so break
                         break;
                     } else {
                         // Use global merge kernel
-                        let command_buffer = self.command_queue.new_command_buffer();
                         let encoder = command_buffer.new_compute_command_encoder();
                         encoder.set_compute_pipeline_state(&self.global_merge_pipeline);
 
-                        // Create parameter buffers for this dispatch
-                        let block_size_buffer = self.device.new_buffer_with_data(
-                            &block_size as *const u32 as *const _,
-                            mem::size_of::<u32>() as u64,
-                            MTLResourceOptions::StorageModeShared,
-                        );
+                        // Create parameter buffer for comparison distance
                         let comp_dist_buffer = self.device.new_buffer_with_data(
                             &comparison_distance as *const u32 as *const _,
                             mem::size_of::<u32>() as u64,
@@ -570,22 +579,17 @@ kernel void bitonic_merge_local(
                         encoder.set_buffer(2, Some(&comp_dist_buffer), 0);
                         encoder.set_buffer(3, Some(&array_size_buffer), 0);
 
-                        let num_threads = n / 2;
-                        let thread_group_size = self
-                            .global_merge_pipeline
-                            .max_total_threads_per_threadgroup()
-                            .min(num_threads as u64);
-
                         let grid_size = MTLSize::new(num_threads as u64, 1, 1);
-                        let threadgroup_size = MTLSize::new(thread_group_size, 1, 1);
+                        let threadgroup_size_global = MTLSize::new(thread_group_size, 1, 1);
 
-                        encoder.dispatch_threads(grid_size, threadgroup_size);
+                        encoder.dispatch_threads(grid_size, threadgroup_size_global);
                         encoder.end_encoding();
-
-                        command_buffer.commit();
-                        command_buffer.wait_until_completed();
                     }
                 }
+
+                // Submit all substages of this stage at once
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
             }
 
             // Copy result back to CPU

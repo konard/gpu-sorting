@@ -523,6 +523,7 @@ fn run_comprehensive_benchmark(generate_report: bool, gpu_device: &str) {
     println!("====================================\n");
 
     // Use power of 2 sizes for easy benchmarking (as per issue requirements)
+    // Extended to 64M elements to test GPU performance at very large scales
     let sizes: Vec<usize> = vec![
         1 << 10, // 1K
         1 << 12, // 4K
@@ -532,6 +533,7 @@ fn run_comprehensive_benchmark(generate_report: bool, gpu_device: &str) {
         1 << 20, // 1M
         1 << 22, // 4M
         1 << 24, // 16M
+        1 << 26, // 64M - Added per user request: larger datasets may show greater GPU advantage
     ];
 
     let gpu_bitonic_sorter = match gpu_sort::GpuSorter::new() {
