@@ -172,6 +172,12 @@ mod metal_impl {
         /// 3. Scan: Compute prefix sums
         /// 4. Scatter offsets: Compute per-threadgroup offsets
         /// 5. Scatter: Reorder keys
+        ///
+        /// ## Optimization: Command Buffer Batching
+        ///
+        /// This implementation batches all kernel dispatches within a single radix pass
+        /// into ONE command buffer, reducing 20 GPU submissions to just 4 (one per pass).
+        /// This dramatically reduces CPU-GPU synchronization overhead.
         pub fn sort(&self, data: &mut [u32]) -> Result<(), String> {
             let n = data.len();
 
@@ -232,8 +238,21 @@ mod metal_impl {
                 MTLResourceOptions::StorageModeShared,
             );
 
+            // Pre-create shift buffers for all 4 passes
+            let shift_buffers: Vec<_> = (0..4u32)
+                .map(|pass| {
+                    let shift = pass * RADIX_BITS;
+                    self.device.new_buffer_with_data(
+                        &shift as *const u32 as *const _,
+                        mem::size_of::<u32>() as u64,
+                        MTLResourceOptions::StorageModeShared,
+                    )
+                })
+                .collect();
+
             // Threadgroup memory sizes
             let histogram_tg_mem = (RADIX_SIZE * mem::size_of::<u32>()) as u64;
+            let threadgroup_mem = (THREADGROUP_SIZE * mem::size_of::<u32>()) as u64;
 
             // Determine actual threadgroup size to use
             let tg_size = THREADGROUP_SIZE.min(self.max_threadgroup_size);
@@ -243,25 +262,23 @@ mod metal_impl {
             let mut output_buffer = &buffer_b;
 
             for pass in 0..4u32 {
-                let shift = pass * RADIX_BITS;
+                let shift_buffer = &shift_buffers[pass as usize];
 
-                // Create shift buffer
-                let shift_buffer = self.device.new_buffer_with_data(
-                    &shift as *const u32 as *const _,
-                    mem::size_of::<u32>() as u64,
-                    MTLResourceOptions::StorageModeShared,
-                );
+                // =====================================================
+                // BATCHED COMMAND BUFFER: All 5 kernels in ONE buffer
+                // =====================================================
+                // This reduces 5 separate GPU submissions per pass to just 1,
+                // cutting total submissions from 20 to 4.
+                let command_buffer = self.command_queue.new_command_buffer();
 
-                // ====== Pass 1: Histogram ======
+                // ====== Kernel 1: Histogram ======
                 {
-                    let command_buffer = self.command_queue.new_command_buffer();
                     let encoder = command_buffer.new_compute_command_encoder();
-
                     encoder.set_compute_pipeline_state(&self.histogram_pipeline);
                     encoder.set_buffer(0, Some(input_buffer), 0);
                     encoder.set_buffer(1, Some(&histogram_buffer), 0);
                     encoder.set_buffer(2, Some(&array_size_buffer), 0);
-                    encoder.set_buffer(3, Some(&shift_buffer), 0);
+                    encoder.set_buffer(3, Some(shift_buffer), 0);
                     encoder.set_threadgroup_memory_length(0, histogram_tg_mem);
 
                     let grid_size = MTLSize::new((num_threadgroups * tg_size) as u64, 1, 1);
@@ -269,16 +286,11 @@ mod metal_impl {
 
                     encoder.dispatch_threads(grid_size, threadgroup_size);
                     encoder.end_encoding();
-
-                    command_buffer.commit();
-                    command_buffer.wait_until_completed();
                 }
 
-                // ====== Pass 2a: Reduce ======
+                // ====== Kernel 2: Reduce ======
                 {
-                    let command_buffer = self.command_queue.new_command_buffer();
                     let encoder = command_buffer.new_compute_command_encoder();
-
                     encoder.set_compute_pipeline_state(&self.reduce_pipeline);
                     encoder.set_buffer(0, Some(&histogram_buffer), 0);
                     encoder.set_buffer(1, Some(&global_histogram_buffer), 0);
@@ -290,16 +302,11 @@ mod metal_impl {
 
                     encoder.dispatch_threads(grid_size, threadgroup_size);
                     encoder.end_encoding();
-
-                    command_buffer.commit();
-                    command_buffer.wait_until_completed();
                 }
 
-                // ====== Pass 2b: Scan ======
+                // ====== Kernel 3: Scan ======
                 {
-                    let command_buffer = self.command_queue.new_command_buffer();
                     let encoder = command_buffer.new_compute_command_encoder();
-
                     encoder.set_compute_pipeline_state(&self.scan_pipeline);
                     encoder.set_buffer(0, Some(&global_histogram_buffer), 0);
                     encoder.set_threadgroup_memory_length(0, histogram_tg_mem);
@@ -310,16 +317,11 @@ mod metal_impl {
 
                     encoder.dispatch_threads(grid_size, threadgroup_size);
                     encoder.end_encoding();
-
-                    command_buffer.commit();
-                    command_buffer.wait_until_completed();
                 }
 
-                // ====== Pass 2c: Scatter Offsets ======
+                // ====== Kernel 4: Scatter Offsets ======
                 {
-                    let command_buffer = self.command_queue.new_command_buffer();
                     let encoder = command_buffer.new_compute_command_encoder();
-
                     encoder.set_compute_pipeline_state(&self.scatter_offsets_pipeline);
                     encoder.set_buffer(0, Some(&histogram_buffer), 0);
                     encoder.set_buffer(1, Some(&global_histogram_buffer), 0);
@@ -332,60 +334,43 @@ mod metal_impl {
 
                     encoder.dispatch_threads(grid_size, threadgroup_size);
                     encoder.end_encoding();
-
-                    command_buffer.commit();
-                    command_buffer.wait_until_completed();
                 }
 
-                // ====== Pass 3: Scatter ======
+                // ====== Kernel 5: Scatter ======
                 {
-                    let command_buffer = self.command_queue.new_command_buffer();
                     let encoder = command_buffer.new_compute_command_encoder();
 
                     // Choose between basic and SIMD-optimized scatter kernel
                     if self.use_simd {
                         encoder.set_compute_pipeline_state(&self.scatter_simd_pipeline);
-                        encoder.set_buffer(0, Some(input_buffer), 0);
-                        encoder.set_buffer(1, Some(output_buffer), 0);
-                        encoder.set_buffer(2, Some(&scatter_offsets_buffer), 0);
-                        encoder.set_buffer(3, Some(&array_size_buffer), 0);
-                        encoder.set_buffer(4, Some(&shift_buffer), 0);
-
-                        // Threadgroup memory for SIMD scatter kernel (same as basic kernel):
-                        // - local_offsets: RADIX_SIZE = 256 uints
-                        // - shared_digits: THREADGROUP_SIZE = 256 uints
-                        // - digit_counts: RADIX_SIZE = 256 uints
-                        let threadgroup_mem = (THREADGROUP_SIZE * mem::size_of::<u32>()) as u64;
-                        encoder.set_threadgroup_memory_length(0, histogram_tg_mem);
-                        encoder.set_threadgroup_memory_length(1, threadgroup_mem);
-                        encoder.set_threadgroup_memory_length(2, histogram_tg_mem);
                     } else {
                         encoder.set_compute_pipeline_state(&self.scatter_pipeline);
-                        encoder.set_buffer(0, Some(input_buffer), 0);
-                        encoder.set_buffer(1, Some(output_buffer), 0);
-                        encoder.set_buffer(2, Some(&scatter_offsets_buffer), 0);
-                        encoder.set_buffer(3, Some(&array_size_buffer), 0);
-                        encoder.set_buffer(4, Some(&shift_buffer), 0);
-
-                        // Threadgroup memory for basic scatter kernel:
-                        // - local_offsets: RADIX_SIZE = 256 uints
-                        // - shared_digits: THREADGROUP_SIZE = 256 uints
-                        // - digit_counts: RADIX_SIZE = 256 uints
-                        let threadgroup_mem = (THREADGROUP_SIZE * mem::size_of::<u32>()) as u64;
-                        encoder.set_threadgroup_memory_length(0, histogram_tg_mem);
-                        encoder.set_threadgroup_memory_length(1, threadgroup_mem);
-                        encoder.set_threadgroup_memory_length(2, histogram_tg_mem);
                     }
+
+                    encoder.set_buffer(0, Some(input_buffer), 0);
+                    encoder.set_buffer(1, Some(output_buffer), 0);
+                    encoder.set_buffer(2, Some(&scatter_offsets_buffer), 0);
+                    encoder.set_buffer(3, Some(&array_size_buffer), 0);
+                    encoder.set_buffer(4, Some(shift_buffer), 0);
+
+                    // Threadgroup memory for scatter kernel:
+                    // - local_offsets: RADIX_SIZE = 256 uints
+                    // - shared_digits: THREADGROUP_SIZE = 256 uints
+                    // - digit_counts: RADIX_SIZE = 256 uints
+                    encoder.set_threadgroup_memory_length(0, histogram_tg_mem);
+                    encoder.set_threadgroup_memory_length(1, threadgroup_mem);
+                    encoder.set_threadgroup_memory_length(2, histogram_tg_mem);
 
                     let grid_size = MTLSize::new((num_threadgroups * tg_size) as u64, 1, 1);
                     let threadgroup_size = MTLSize::new(tg_size as u64, 1, 1);
 
                     encoder.dispatch_threads(grid_size, threadgroup_size);
                     encoder.end_encoding();
-
-                    command_buffer.commit();
-                    command_buffer.wait_until_completed();
                 }
+
+                // Submit all 5 kernels at once and wait
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
 
                 // Swap buffers for next pass
                 std::mem::swap(&mut input_buffer, &mut output_buffer);

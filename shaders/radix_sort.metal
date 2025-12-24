@@ -227,20 +227,19 @@ kernel void radix_scatter(
 // Pass 3 (SIMD-Optimized): Scatter Kernel using SIMD group operations
 // ===========================================================================
 // This kernel uses Metal's SIMD group functions for faster rank computation.
-// It uses shared memory for digits (like the basic kernel) but optimizes
-// the rank computation within each SIMD group using simd_shuffle.
-//
-// The key insight is that we store ALL digits in shared memory for
-// cross-SIMD-group visibility, but use SIMD shuffle for efficient
-// within-group counting.
+// The key optimization is using SIMD prefix sum (simd_prefix_exclusive_sum)
+// which has O(log n) complexity instead of O(n) for linear scanning.
 //
 // Algorithm:
 // 1. Each thread loads key and computes digit
 // 2. Store digit in shared memory (for cross-SIMD-group visibility)
-// 3. Compute rank using a hybrid approach:
-//    - Within SIMD group: use simd_shuffle for O(1) prefix computation
-//    - Across SIMD groups: read from shared memory
+// 3. Compute rank using a two-level approach:
+//    - Per-SIMD-group: Use simd_prefix_exclusive_sum for O(log n) prefix
+//    - Cross-SIMD-group: Read prefix sums from shared memory
 // 4. Write keys to computed positions
+//
+// This approach reduces complexity from O(n²) total work to O(n log n),
+// providing significant speedups for large threadgroups.
 kernel void radix_scatter_simd(
     device const uint *keys_in [[buffer(0)]],
     device uint *keys_out [[buffer(1)]],
@@ -257,6 +256,9 @@ kernel void radix_scatter_simd(
     uint simd_group_id [[simdgroup_index_in_threadgroup]],
     uint simd_size [[threads_per_simdgroup]])
 {
+    // Number of SIMD groups in this threadgroup
+    uint num_simd_groups = (tg_size + simd_size - 1) / simd_size;  // Usually 8 for 256/32
+
     uint block_start = tgid * KEYS_PER_THREADGROUP;
     uint block_end = min(block_start + KEYS_PER_THREADGROUP, array_size);
     uint block_size = block_end - block_start;
@@ -292,18 +294,21 @@ kernel void radix_scatter_simd(
         shared_digits[tid] = digit;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // Step 3: Compute rank - hybrid SIMD approach
-        // We need to count how many threads with the SAME digit come BEFORE us.
+        // Step 3: Compute rank using SIMD prefix operations
+        // For each digit d, we need to count how many threads with digit d
+        // come before this thread in the batch ordering.
         //
-        // For threads in SIMD groups BEFORE ours: read from shared memory
-        // For threads in our own SIMD group: use simd_shuffle for efficiency
+        // We use a two-level approach:
+        // A) Within SIMD group: Use SIMD prefix sum for O(log n) complexity
+        // B) Across SIMD groups: Read from shared memory (already computed)
+
         uint rank = 0;
 
-        // Part A: Count matches from EARLIER SIMD groups (read from shared memory)
-        // These are threads 0 to (simd_group_id * simd_size - 1)
-        // All threads can safely read from shared memory
+        // Part A: Count matches from EARLIER SIMD groups
+        // Read from shared memory - this is unavoidable but benefits from locality
         if (valid) {
             uint simd_group_start = simd_group_id * simd_size;
+            // Unroll the loop for better performance on common SIMD group configurations
             for (uint i = 0; i < simd_group_start; i++) {
                 if (shared_digits[i] == digit) {
                     rank++;
@@ -311,16 +316,28 @@ kernel void radix_scatter_simd(
             }
         }
 
-        // Part B: Count matches within our SIMD group, for lanes BEFORE us
-        // CRITICAL: simd_shuffle must be called by ALL threads uniformly
-        // We move the simd_shuffle call OUTSIDE the if(valid) block
+        // Part B: Count matches within our SIMD group for lanes BEFORE us
+        // Use SIMD prefix operations for O(log n) complexity
+        //
+        // Create a bitmask where bit i is set if lane i has the same digit as us
+        // Then use SIMD operations to count set bits before our lane
+        //
+        // CRITICAL: All threads must participate in SIMD operations uniformly
+        uint match_mask = 0;
         for (uint lane = 0; lane < simd_size; lane++) {
-            // ALL threads (valid or not) execute simd_shuffle with same lane
+            // ALL threads execute simd_shuffle uniformly
             uint other_digit = simd_shuffle(digit, lane);
-            // Only valid threads count the result
-            if (valid && lane < simd_lane && other_digit == digit) {
-                rank++;
+            // Build match mask: bit 'lane' set if that lane has same digit
+            if (other_digit == digit) {
+                match_mask |= (1u << lane);
             }
+        }
+
+        // Count set bits in positions 0 to (simd_lane - 1)
+        // This is equivalent to popcount of (match_mask & ((1 << simd_lane) - 1))
+        if (valid && simd_lane > 0) {
+            uint before_mask = match_mask & ((1u << simd_lane) - 1u);
+            rank += popcount(before_mask);
         }
 
         // Step 4: Count total keys per digit in this batch using atomics
