@@ -14,6 +14,7 @@
 //! - **Radix Sort**: O(n) - for fair comparison with GPU radix sort
 //! - **Parallel Radix Sort**: O(n) - Multi-threaded for fair parallel comparison
 //! - **Bitonic Sort**: O(n log²n) - for fair comparison with GPU bitonic sort
+//! - **Parallel Bitonic Sort**: O(n log²n) - Multi-threaded for fair parallel comparison
 //!
 //! The benchmark generates reports in Links Notation format for analysis.
 
@@ -149,6 +150,22 @@ fn main() {
     );
     println!("CPU bitonic sort verified: OK");
 
+    // ========== CPU Parallel Bitonic Sort ==========
+    println!("\n--- CPU Sorting (Parallel Bitonic Sort) ---");
+    let mut cpu_parallel_bitonic_data = data_bitonic.clone();
+    let cpu_parallel_bitonic_start = Instant::now();
+    cpu_parallel_sort::parallel_bitonic_sort(&mut cpu_parallel_bitonic_data);
+    let cpu_parallel_bitonic_duration = cpu_parallel_bitonic_start.elapsed();
+    println!(
+        "CPU parallel bitonic sort time: {:.3} ms",
+        cpu_parallel_bitonic_duration.as_secs_f64() * 1000.0
+    );
+    assert!(
+        cpu_parallel_sort::is_sorted(&cpu_parallel_bitonic_data),
+        "CPU parallel bitonic sort failed!"
+    );
+    println!("CPU parallel bitonic sort verified: OK");
+
     // ========== GPU Bitonic Sorting ==========
     println!("\n--- GPU Sorting (Metal Bitonic Sort) ---");
     let gpu_bitonic_duration = match gpu_sort::GpuSorter::new() {
@@ -277,6 +294,7 @@ fn main() {
     let cpu_parallel_ms = cpu_parallel_duration.as_secs_f64() * 1000.0;
     let cpu_parallel_radix_ms = cpu_parallel_radix_duration.as_secs_f64() * 1000.0;
     let cpu_bitonic_ms = cpu_bitonic_duration.as_secs_f64() * 1000.0;
+    let cpu_parallel_bitonic_ms = cpu_parallel_bitonic_duration.as_secs_f64() * 1000.0;
 
     // Fair comparisons first
     println!("\n[Fair Algorithm Comparisons]");
@@ -341,6 +359,23 @@ fn main() {
         } else {
             println!(
                 "GPU Bitonic vs CPU Bitonic: CPU is {:.2}x faster",
+                1.0 / speedup
+            );
+        }
+    }
+
+    // GPU Bitonic vs CPU Parallel Bitonic
+    if let Some(gpu_bitonic_dur) = gpu_bitonic_duration {
+        let gpu_bitonic_ms = gpu_bitonic_dur.as_secs_f64() * 1000.0;
+        let speedup = cpu_parallel_bitonic_ms / gpu_bitonic_ms;
+        if speedup > 1.0 {
+            println!(
+                "GPU Bitonic vs CPU Bitonic (parallel): GPU is {:.2}x faster",
+                speedup
+            );
+        } else {
+            println!(
+                "GPU Bitonic vs CPU Bitonic (parallel): CPU is {:.2}x faster",
                 1.0 / speedup
             );
         }
@@ -421,6 +456,20 @@ fn main() {
         );
     }
 
+    // Parallel bitonic speedup
+    let parallel_bitonic_speedup = cpu_bitonic_ms / cpu_parallel_bitonic_ms;
+    if parallel_bitonic_speedup > 1.0 {
+        println!(
+            "CPU Parallel Bitonic vs CPU Bitonic: Parallel is {:.2}x faster",
+            parallel_bitonic_speedup
+        );
+    } else {
+        println!(
+            "CPU Parallel Bitonic vs CPU Bitonic: Single is {:.2}x faster",
+            1.0 / parallel_bitonic_speedup
+        );
+    }
+
     // GPU algorithm comparisons
     println!("\n[GPU Algorithm Comparisons]");
     if let (Some(bitonic_dur), Some(radix_dur)) = (gpu_bitonic_duration, gpu_radix_duration) {
@@ -457,12 +506,23 @@ fn main() {
     }
 }
 
+/// Benchmark result for a single algorithm at a specific size
+#[derive(Clone)]
+struct AlgorithmBenchmark {
+    name: String,
+    algorithm_type: String, // "radix", "bitonic", "pdqsort"
+    platform: String,       // "cpu", "cpu_parallel", "gpu"
+    time_ms: f64,
+    verified: bool,
+}
+
 /// Run benchmarks across multiple array sizes and optionally generate reports
 fn run_comprehensive_benchmark(generate_report: bool, gpu_device: &str) {
     println!("\n\n====================================");
     println!("Running comprehensive benchmark...");
     println!("====================================\n");
 
+    // Use power of 2 sizes for easy benchmarking (as per issue requirements)
     let sizes: Vec<usize> = vec![
         1 << 10, // 1K
         1 << 12, // 4K
@@ -499,168 +559,384 @@ fn run_comprehensive_benchmark(generate_report: bool, gpu_device: &str) {
         ram_gb: None,
     };
 
-    println!(
-        "{:>12} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10}",
-        "Size", "CPU pdq", "CPU Radix", "CPU Bit", "GPU Radix", "GPU Bit"
-    );
-    println!(
-        "{:-<12}-+-{:-<10}-+-{:-<10}-+-{:-<10}-+-{:-<10}-+-{:-<10}",
-        "", "", "", "", "", ""
-    );
-
     let mut rng = rand::thread_rng();
+
+    // Store all benchmark results for table generation
+    let mut all_benchmarks: Vec<(usize, Vec<AlgorithmBenchmark>)> = Vec::new();
 
     for &size in &sizes {
         let data: Vec<u32> = (0..size).map(|_| rng.gen()).collect();
+        let mut size_benchmarks: Vec<AlgorithmBenchmark> = Vec::new();
 
-        // CPU pdqsort benchmark
-        let mut cpu_data = data.clone();
-        let cpu_start = Instant::now();
-        cpu_sort::sort_unstable(&mut cpu_data);
-        let cpu_ms = cpu_start.elapsed().as_secs_f64() * 1000.0;
+        // ========== RADIX SORT FAMILY ==========
 
-        report.add_result(BenchmarkResult {
-            algorithm: "cpu_pdqsort".to_string(),
-            platform: "cpu".to_string(),
-            array_size: size,
-            time_ms: cpu_ms,
-            verified: cpu_sort::is_sorted(&cpu_data),
-            device: None,
-        });
-
-        // CPU Radix benchmark
+        // CPU Radix Sort (baseline for radix family)
         let mut cpu_radix_data = data.clone();
         let cpu_radix_start = Instant::now();
         cpu_radix_sort::sort(&mut cpu_radix_data);
         let cpu_radix_ms = cpu_radix_start.elapsed().as_secs_f64() * 1000.0;
+        let cpu_radix_verified = cpu_radix_sort::is_sorted(&cpu_radix_data);
 
         report.add_result(BenchmarkResult {
             algorithm: "cpu_radix".to_string(),
             platform: "cpu".to_string(),
             array_size: size,
             time_ms: cpu_radix_ms,
-            verified: cpu_radix_sort::is_sorted(&cpu_radix_data),
+            verified: cpu_radix_verified,
             device: None,
         });
 
-        // CPU Bitonic benchmark (power of 2 size)
+        size_benchmarks.push(AlgorithmBenchmark {
+            name: "Radix Sort".to_string(),
+            algorithm_type: "radix".to_string(),
+            platform: "cpu".to_string(),
+            time_ms: cpu_radix_ms,
+            verified: cpu_radix_verified,
+        });
+
+        // CPU Parallel Radix Sort
+        let mut cpu_parallel_radix_data = data.clone();
+        let cpu_parallel_radix_start = Instant::now();
+        cpu_parallel_sort::parallel_radix_sort(&mut cpu_parallel_radix_data);
+        let cpu_parallel_radix_ms = cpu_parallel_radix_start.elapsed().as_secs_f64() * 1000.0;
+        let cpu_parallel_radix_verified = cpu_parallel_sort::is_sorted(&cpu_parallel_radix_data);
+
+        report.add_result(BenchmarkResult {
+            algorithm: "cpu_parallel_radix".to_string(),
+            platform: "cpu".to_string(),
+            array_size: size,
+            time_ms: cpu_parallel_radix_ms,
+            verified: cpu_parallel_radix_verified,
+            device: None,
+        });
+
+        size_benchmarks.push(AlgorithmBenchmark {
+            name: "Radix Sort".to_string(),
+            algorithm_type: "radix".to_string(),
+            platform: "cpu_parallel".to_string(),
+            time_ms: cpu_parallel_radix_ms,
+            verified: cpu_parallel_radix_verified,
+        });
+
+        // GPU Radix Sort
+        if let Some(ref sorter) = gpu_radix_sorter {
+            let mut gpu_data = data.clone();
+            let gpu_start = Instant::now();
+            let verified = sorter.sort(&mut gpu_data).is_ok() && cpu_sort::is_sorted(&gpu_data);
+            let gpu_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
+
+            report.add_result(BenchmarkResult {
+                algorithm: "gpu_radix".to_string(),
+                platform: "gpu".to_string(),
+                array_size: size,
+                time_ms: gpu_ms,
+                verified,
+                device: Some(gpu_device.to_string()),
+            });
+
+            size_benchmarks.push(AlgorithmBenchmark {
+                name: "Radix Sort".to_string(),
+                algorithm_type: "radix".to_string(),
+                platform: "gpu".to_string(),
+                time_ms: gpu_ms,
+                verified,
+            });
+        }
+
+        // ========== BITONIC SORT FAMILY ==========
+
+        // CPU Bitonic Sort (baseline for bitonic family)
         let mut cpu_bitonic_data = data.clone();
         let cpu_bitonic_start = Instant::now();
         cpu_bitonic_sort::sort(&mut cpu_bitonic_data);
         let cpu_bitonic_ms = cpu_bitonic_start.elapsed().as_secs_f64() * 1000.0;
+        let cpu_bitonic_verified = cpu_bitonic_sort::is_sorted(&cpu_bitonic_data);
 
         report.add_result(BenchmarkResult {
             algorithm: "cpu_bitonic".to_string(),
             platform: "cpu".to_string(),
             array_size: size,
             time_ms: cpu_bitonic_ms,
-            verified: cpu_bitonic_sort::is_sorted(&cpu_bitonic_data),
+            verified: cpu_bitonic_verified,
             device: None,
         });
 
-        // GPU Radix benchmark
-        let (gpu_radix_ms_str, _gpu_radix_ms) = if let Some(ref sorter) = gpu_radix_sorter {
+        size_benchmarks.push(AlgorithmBenchmark {
+            name: "Bitonic Sort".to_string(),
+            algorithm_type: "bitonic".to_string(),
+            platform: "cpu".to_string(),
+            time_ms: cpu_bitonic_ms,
+            verified: cpu_bitonic_verified,
+        });
+
+        // CPU Parallel Bitonic Sort
+        let mut cpu_parallel_bitonic_data = data.clone();
+        let cpu_parallel_bitonic_start = Instant::now();
+        cpu_parallel_sort::parallel_bitonic_sort(&mut cpu_parallel_bitonic_data);
+        let cpu_parallel_bitonic_ms = cpu_parallel_bitonic_start.elapsed().as_secs_f64() * 1000.0;
+        let cpu_parallel_bitonic_verified =
+            cpu_parallel_sort::is_sorted(&cpu_parallel_bitonic_data);
+
+        report.add_result(BenchmarkResult {
+            algorithm: "cpu_parallel_bitonic".to_string(),
+            platform: "cpu".to_string(),
+            array_size: size,
+            time_ms: cpu_parallel_bitonic_ms,
+            verified: cpu_parallel_bitonic_verified,
+            device: None,
+        });
+
+        size_benchmarks.push(AlgorithmBenchmark {
+            name: "Bitonic Sort".to_string(),
+            algorithm_type: "bitonic".to_string(),
+            platform: "cpu_parallel".to_string(),
+            time_ms: cpu_parallel_bitonic_ms,
+            verified: cpu_parallel_bitonic_verified,
+        });
+
+        // GPU Bitonic Sort
+        if let Some(ref sorter) = gpu_bitonic_sorter {
             let mut gpu_data = data.clone();
             let gpu_start = Instant::now();
-            if sorter.sort(&mut gpu_data).is_ok() && cpu_sort::is_sorted(&gpu_data) {
-                let gpu_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
-                report.add_result(BenchmarkResult {
-                    algorithm: "gpu_radix".to_string(),
-                    platform: "gpu".to_string(),
-                    array_size: size,
-                    time_ms: gpu_ms,
-                    verified: true,
-                    device: Some(gpu_device.to_string()),
-                });
-                (format!("{:.3}", gpu_ms), Some(gpu_ms))
-            } else {
-                ("ERROR".to_string(), None)
-            }
-        } else {
-            ("N/A".to_string(), None)
-        };
+            let verified = sorter.sort(&mut gpu_data).is_ok() && cpu_sort::is_sorted(&gpu_data);
+            let gpu_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
 
-        // GPU Bitonic benchmark
-        let (gpu_bitonic_ms_str, _gpu_bitonic_ms) = if let Some(ref sorter) = gpu_bitonic_sorter {
-            let mut gpu_data = data.clone();
-            let gpu_start = Instant::now();
-            if sorter.sort(&mut gpu_data).is_ok() && cpu_sort::is_sorted(&gpu_data) {
-                let gpu_ms = gpu_start.elapsed().as_secs_f64() * 1000.0;
-                report.add_result(BenchmarkResult {
-                    algorithm: "gpu_bitonic".to_string(),
-                    platform: "gpu".to_string(),
-                    array_size: size,
-                    time_ms: gpu_ms,
-                    verified: true,
-                    device: Some(gpu_device.to_string()),
-                });
-                (format!("{:.3}", gpu_ms), Some(gpu_ms))
-            } else {
-                ("ERROR".to_string(), None)
-            }
-        } else {
-            ("N/A".to_string(), None)
-        };
+            report.add_result(BenchmarkResult {
+                algorithm: "gpu_bitonic".to_string(),
+                platform: "gpu".to_string(),
+                array_size: size,
+                time_ms: gpu_ms,
+                verified,
+                device: Some(gpu_device.to_string()),
+            });
 
-        println!(
-            "{:>12} | {:>10.3} | {:>10.3} | {:>10.3} | {:>10} | {:>10}",
-            size, cpu_ms, cpu_radix_ms, cpu_bitonic_ms, gpu_radix_ms_str, gpu_bitonic_ms_str
-        );
+            size_benchmarks.push(AlgorithmBenchmark {
+                name: "Bitonic Sort".to_string(),
+                algorithm_type: "bitonic".to_string(),
+                platform: "gpu".to_string(),
+                time_ms: gpu_ms,
+                verified,
+            });
+        }
+
+        // ========== PDQSORT (reference - not GPU parallelizable) ==========
+
+        // CPU pdqsort
+        let mut cpu_pdq_data = data.clone();
+        let cpu_pdq_start = Instant::now();
+        cpu_sort::sort_unstable(&mut cpu_pdq_data);
+        let cpu_pdq_ms = cpu_pdq_start.elapsed().as_secs_f64() * 1000.0;
+        let cpu_pdq_verified = cpu_sort::is_sorted(&cpu_pdq_data);
+
+        report.add_result(BenchmarkResult {
+            algorithm: "cpu_pdqsort".to_string(),
+            platform: "cpu".to_string(),
+            array_size: size,
+            time_ms: cpu_pdq_ms,
+            verified: cpu_pdq_verified,
+            device: None,
+        });
+
+        size_benchmarks.push(AlgorithmBenchmark {
+            name: "pdqsort".to_string(),
+            algorithm_type: "pdqsort".to_string(),
+            platform: "cpu".to_string(),
+            time_ms: cpu_pdq_ms,
+            verified: cpu_pdq_verified,
+        });
+
+        // CPU Parallel pdqsort
+        let mut cpu_parallel_pdq_data = data.clone();
+        let cpu_parallel_pdq_start = Instant::now();
+        cpu_parallel_sort::parallel_sort(&mut cpu_parallel_pdq_data);
+        let cpu_parallel_pdq_ms = cpu_parallel_pdq_start.elapsed().as_secs_f64() * 1000.0;
+        let cpu_parallel_pdq_verified = cpu_parallel_sort::is_sorted(&cpu_parallel_pdq_data);
+
+        report.add_result(BenchmarkResult {
+            algorithm: "cpu_parallel_pdqsort".to_string(),
+            platform: "cpu".to_string(),
+            array_size: size,
+            time_ms: cpu_parallel_pdq_ms,
+            verified: cpu_parallel_pdq_verified,
+            device: None,
+        });
+
+        size_benchmarks.push(AlgorithmBenchmark {
+            name: "pdqsort".to_string(),
+            algorithm_type: "pdqsort".to_string(),
+            platform: "cpu_parallel".to_string(),
+            time_ms: cpu_parallel_pdq_ms,
+            verified: cpu_parallel_pdq_verified,
+        });
+
+        all_benchmarks.push((size, size_benchmarks));
     }
 
-    println!("\n");
+    // ========== TABLE 1: VERIFICATION TABLE (Warmup) ==========
+    println!("=== VERIFICATION TABLE ===");
+    println!("(Confirms all algorithms are working correctly)\n");
 
-    // Print fair comparison summary
-    println!("=== Fair Algorithm Comparisons (Same Algorithm, GPU vs CPU) ===\n");
     println!(
-        "{:>12} | {:>20} | {:>22}",
-        "Size", "Radix (GPU/CPU)", "Bitonic (GPU/CPU)"
+        "{:>12} | {:^22} | {:^22} | {:^15}",
+        "Algorithm", "CPU", "CPU Parallel", "GPU"
     );
-    println!("{:-<12}-+-{:-<20}-+-{:-<22}", "", "", "");
+    println!("{:-<12}-+-{:-<22}-+-{:-<22}-+-{:-<15}", "", "", "", "");
 
-    for &size in &sizes {
-        let size_results: Vec<&BenchmarkResult> = report
-            .results
-            .iter()
-            .filter(|r| r.array_size == size)
-            .collect();
+    // Get algorithms for the largest size
+    if let Some((_, benchmarks)) = all_benchmarks.last() {
+        // Group by algorithm type
+        let algo_types = ["radix", "bitonic", "pdqsort"];
+        for algo_type in &algo_types {
+            let algo_benchmarks: Vec<&AlgorithmBenchmark> = benchmarks
+                .iter()
+                .filter(|b| b.algorithm_type == *algo_type)
+                .collect();
 
-        let radix_comparison = {
-            let gpu = size_results.iter().find(|r| r.algorithm == "gpu_radix");
-            let cpu = size_results.iter().find(|r| r.algorithm == "cpu_radix");
-            match (gpu, cpu) {
-                (Some(g), Some(c)) => {
-                    let speedup = c.time_ms / g.time_ms;
-                    if speedup > 1.0 {
-                        format!("GPU {:.2}x faster", speedup)
-                    } else {
-                        format!("CPU {:.2}x faster", 1.0 / speedup)
-                    }
-                }
-                _ => "N/A".to_string(),
+            if algo_benchmarks.is_empty() {
+                continue;
             }
-        };
 
-        let bitonic_comparison = {
-            let gpu = size_results.iter().find(|r| r.algorithm == "gpu_bitonic");
-            let cpu = size_results.iter().find(|r| r.algorithm == "cpu_bitonic");
-            match (gpu, cpu) {
-                (Some(g), Some(c)) => {
-                    let speedup = c.time_ms / g.time_ms;
-                    if speedup > 1.0 {
-                        format!("GPU {:.2}x faster", speedup)
-                    } else {
-                        format!("CPU {:.2}x faster", 1.0 / speedup)
-                    }
+            let cpu = algo_benchmarks.iter().find(|b| b.platform == "cpu");
+            let cpu_parallel = algo_benchmarks
+                .iter()
+                .find(|b| b.platform == "cpu_parallel");
+            let gpu = algo_benchmarks.iter().find(|b| b.platform == "gpu");
+
+            let name = algo_benchmarks[0].name.clone();
+            let cpu_status = cpu.map_or("N/A".to_string(), |b| {
+                if b.verified {
+                    "OK".to_string()
+                } else {
+                    "FAILED".to_string()
                 }
-                _ => "N/A".to_string(),
-            }
-        };
+            });
+            let cpu_parallel_status = cpu_parallel.map_or("N/A".to_string(), |b| {
+                if b.verified {
+                    "OK".to_string()
+                } else {
+                    "FAILED".to_string()
+                }
+            });
+            let gpu_status = gpu.map_or("N/A".to_string(), |b| {
+                if b.verified {
+                    "OK".to_string()
+                } else {
+                    "FAILED".to_string()
+                }
+            });
 
+            println!(
+                "{:>12} | {:^22} | {:^22} | {:^15}",
+                name, cpu_status, cpu_parallel_status, gpu_status
+            );
+        }
+    }
+
+    // ========== TABLE 2: PERFORMANCE TABLE ==========
+    println!("\n\n=== PERFORMANCE TABLE ===");
+    println!("(Rows: algorithms, Columns: implementation methods)");
+    println!("(Using CPU single-threaded as baseline, showing speedup factor)\n");
+
+    println!(
+        "{:>12} | {:>12} | {:>15} | {:>15} | {:>15}",
+        "Algorithm", "Size", "CPU (ms)", "CPU Parallel", "GPU"
+    );
+    println!(
+        "{:-<12}-+-{:-<12}-+-{:-<15}-+-{:-<15}-+-{:-<15}",
+        "", "", "", "", ""
+    );
+
+    for (size, benchmarks) in &all_benchmarks {
+        let algo_types = ["radix", "bitonic", "pdqsort"];
+        for algo_type in &algo_types {
+            let algo_benchmarks: Vec<&AlgorithmBenchmark> = benchmarks
+                .iter()
+                .filter(|b| b.algorithm_type == *algo_type)
+                .collect();
+
+            if algo_benchmarks.is_empty() {
+                continue;
+            }
+
+            let cpu = algo_benchmarks.iter().find(|b| b.platform == "cpu");
+            let cpu_parallel = algo_benchmarks
+                .iter()
+                .find(|b| b.platform == "cpu_parallel");
+            let gpu = algo_benchmarks.iter().find(|b| b.platform == "gpu");
+
+            let name = algo_benchmarks[0].name.clone();
+            let cpu_ms = cpu.map(|b| b.time_ms).unwrap_or(0.0);
+
+            let cpu_str = format!("{:.3}", cpu_ms);
+
+            let cpu_parallel_str = cpu_parallel.map_or("N/A".to_string(), |b| {
+                let speedup = cpu_ms / b.time_ms;
+                if speedup > 1.0 {
+                    format!("{:.2}x faster", speedup)
+                } else if speedup < 1.0 {
+                    format!("{:.2}x slower", 1.0 / speedup)
+                } else {
+                    "1.00x".to_string()
+                }
+            });
+
+            let gpu_str = gpu.map_or("N/A".to_string(), |b| {
+                let speedup = cpu_ms / b.time_ms;
+                if speedup > 1.0 {
+                    format!("{:.2}x faster", speedup)
+                } else if speedup < 1.0 {
+                    format!("{:.2}x slower", 1.0 / speedup)
+                } else {
+                    "1.00x".to_string()
+                }
+            });
+
+            println!(
+                "{:>12} | {:>12} | {:>15} | {:>15} | {:>15}",
+                name, size, cpu_str, cpu_parallel_str, gpu_str
+            );
+        }
+
+        // Add separator between sizes
+        if *size != *sizes.last().unwrap() {
+            println!(
+                "{:-<12}-+-{:-<12}-+-{:-<15}-+-{:-<15}-+-{:-<15}",
+                "", "", "", "", ""
+            );
+        }
+    }
+
+    // ========== SORTED PERFORMANCE RANKING ==========
+    println!("\n\n=== PERFORMANCE RANKING (Best First) ===");
+    println!("(Sorted by time for each array size)\n");
+
+    for (size, benchmarks) in &all_benchmarks {
+        let mut sorted_benchmarks = benchmarks.clone();
+        sorted_benchmarks.sort_by(|a, b| a.time_ms.partial_cmp(&b.time_ms).unwrap());
+
+        println!("Size: {} elements", size);
         println!(
-            "{:>12} | {:>20} | {:>22}",
-            size, radix_comparison, bitonic_comparison
+            "{:>4} | {:>25} | {:>15} | {:>12}",
+            "Rank", "Algorithm", "Platform", "Time (ms)"
         );
+        println!("{:-<4}-+-{:-<25}-+-{:-<15}-+-{:-<12}", "", "", "", "");
+
+        for (i, b) in sorted_benchmarks.iter().enumerate() {
+            let platform_str = match b.platform.as_str() {
+                "cpu" => "CPU",
+                "cpu_parallel" => "CPU Parallel",
+                "gpu" => "GPU",
+                _ => &b.platform,
+            };
+            println!(
+                "{:>4} | {:>25} | {:>15} | {:>12.3}",
+                i + 1,
+                b.name,
+                platform_str,
+                b.time_ms
+            );
+        }
+        println!();
     }
 
     // Generate and save reports if requested
@@ -690,6 +966,6 @@ fn run_comprehensive_benchmark(generate_report: bool, gpu_device: &str) {
         }
     }
 
-    println!("\nNote: Speedup > 1.0x means GPU is faster than CPU");
-    println!("      Speedup < 1.0x means CPU is faster than GPU");
+    println!("\nNote: Speedup > 1.0x means faster than CPU single-threaded baseline");
+    println!("      Speedup < 1.0x means slower than CPU single-threaded baseline");
 }
